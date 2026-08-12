@@ -152,7 +152,7 @@ describe('Auth (e2e)', () => {
       const confirmToken = ctx.mailer.tokenFor(email);
 
       await http()
-        .get('/users')
+        .get('/user')
         .set('Authorization', `Bearer ${confirmToken}`)
         .expect(401);
     });
@@ -164,7 +164,7 @@ describe('Auth (e2e)', () => {
       const resetToken = ctx.mailer.tokenFor(user.email);
 
       await http()
-        .get(`/users/${user.id}`)
+        .get(`/user/${user.id}`)
         .set('Authorization', `Bearer ${resetToken}`)
         .expect(401);
     });
@@ -185,7 +185,7 @@ describe('Auth (e2e)', () => {
       const refreshToken = auth.refreshCookie.split('=')[1].split(';')[0];
 
       await http()
-        .get(`/users/${auth.id}`)
+        .get(`/user/${auth.id}`)
         .set('Authorization', `Bearer ${refreshToken}`)
         .expect(401);
     });

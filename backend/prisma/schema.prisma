@@ -19,14 +19,77 @@ enum Role {
   ADMIN
 }
 
+/// Planos da assinatura. FREE e o default e nao passa por checkout.
+/// Ao renomear/adicionar, atualize PLAN_CONFIG (src/payments/plan.config.ts)
+/// e o array PLANS do frontend (components/pricing).
+enum Plan {
+  FREE
+  STANDARD
+  PRO
+}
+
+enum PaymentStatus {
+  PAID
+  FAILED
+  REFUNDED
+}
+
 model User {
   id        String   @id @default(uuid())
   email     String   @unique
+  name      String?
   password  String
   role      Role     @default(USER)
   isVerified Boolean @default(false)
+
+  // --- Billing ---------------------------------------------------------
+  // Estado ATUAL da assinatura. O historico fica em Payment.
+  plan               Plan    @default(FREE)
+  credits            Int     @default(0)
+  /// Espelho do status da Stripe: "active" | "past_due" | "canceled" | null.
+  subscriptionStatus String?
+  /// Unique porque dois usuarios compartilhando o mesmo cliente/assinatura
+  /// corromperia o roteamento dos webhooks (que so trazem IDs da Stripe).
+  stripeCustomerId     String? @unique
+  stripeSubscriptionId String? @unique
+
+  payments Payment[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
+}
+
+/// Historico de cobrancas: uma linha por fatura. Append-only, escrito
+/// exclusivamente pelo webhook da Stripe — nunca por acao do usuario.
+model Payment {
+  id     String @id @default(uuid())
+  userId String
+  user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Plano no MOMENTO da cobranca — congelado, nao segue mudancas futuras.
+  plan     Plan
+  /// Em CENTAVOS (a Stripe trabalha na menor unidade monetaria). Nunca float.
+  amount   Int
+  currency String
+  status   PaymentStatus @default(PAID)
+
+  /// Chave de idempotencia: e o unique daqui que impede a reentrega de um
+  /// evento pela Stripe de duplicar a fatura.
+  stripeInvoiceId      String  @unique
+  stripeCustomerId     String?
+  stripeSubscriptionId String?
+
+  /// Guardados para nao ter que chamar a API da Stripe toda vez que o
+  /// usuario abre a tela de faturas.
+  hostedInvoiceUrl String?
+  invoicePdfUrl    String?
+
+  paidAt DateTime
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
 }
 
 enum Buttons {

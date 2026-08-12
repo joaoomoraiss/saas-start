@@ -1,5 +1,6 @@
 import {
   NotFoundException,
+  UnauthorizedException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import bcrypt from 'bcrypt';
@@ -202,6 +203,104 @@ describe('UsersService', () => {
         where: { email: USER.email },
         omit: { password: false },
       });
+    });
+  });
+
+  describe('perfil', () => {
+    const PERFIL = {
+      ...USER,
+      name: 'Joao',
+      plan: 'STANDARD',
+      credits: 42,
+      subscriptionStatus: 'active',
+      stripeCustomerId: 'cus_1',
+      stripeSubscriptionId: 'sub_1',
+    };
+
+    it('getProfile nao expoe os identificadores da Stripe', async () => {
+      prisma.user.findUnique.mockResolvedValue(PERFIL as any);
+
+      const profile = await service.getProfile(USER.id);
+
+      expect(profile).toEqual({
+        name: 'Joao',
+        email: USER.email,
+        plan: 'STANDARD',
+        credits: 42,
+        subscriptionStatus: 'active',
+        isVerified: false,
+      });
+      expect(profile).not.toHaveProperty('stripeCustomerId');
+      expect(profile).not.toHaveProperty('stripeSubscriptionId');
+      expect(profile).not.toHaveProperty('password');
+    });
+
+    it('getProfile propaga 404 de usuario inexistente', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(service.getProfile('nao-existe')).rejects.toThrow(
+        NotFoundException,
+      );
+    });
+
+    it('updateProfile grava apenas o nome', async () => {
+      prisma.user.findUnique.mockResolvedValue(PERFIL as any);
+
+      await service.updateProfile(USER.id, { name: 'Novo Nome' });
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: USER.id },
+        data: { name: 'Novo Nome' },
+      });
+    });
+
+    it('updateProfile sem campos nao sobrescreve nada', async () => {
+      prisma.user.findUnique.mockResolvedValue(PERFIL as any);
+
+      await service.updateProfile(USER.id, {});
+
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: USER.id },
+        data: {},
+      });
+    });
+  });
+
+  describe('changePassword', () => {
+    async function comSenhaAtual(senha: string) {
+      prisma.user.findUnique.mockResolvedValue({
+        ...USER,
+        password: await bcrypt.hash(senha, 4),
+      } as any);
+    }
+
+    it('recusa quando a senha atual esta errada', async () => {
+      await comSenhaAtual(PASSWORD);
+
+      await expect(
+        service.changePassword(USER.id, 'senha-errada', 'N0va!Senha'),
+      ).rejects.toThrow(UnauthorizedException);
+      expect(prisma.user.update).not.toHaveBeenCalled();
+    });
+
+    it('grava a nova senha com hash quando a atual confere', async () => {
+      await comSenhaAtual(PASSWORD);
+
+      await service.changePassword(USER.id, PASSWORD, 'N0va!Senha');
+
+      const data = prisma.user.update.mock.calls[0][0].data as {
+        password: string;
+      };
+      expect(data.password).not.toBe('N0va!Senha');
+      expect(await bcrypt.compare('N0va!Senha', data.password)).toBe(true);
+    });
+
+    it('404 quando o usuario nao existe', async () => {
+      prisma.user.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.changePassword('nao-existe', PASSWORD, 'N0va!Senha'),
+      ).rejects.toThrow(NotFoundException);
     });
   });
 });

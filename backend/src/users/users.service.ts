@@ -1,6 +1,7 @@
 import {
   Injectable,
   NotFoundException,
+  UnauthorizedException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import bcrypt from 'bcrypt';
@@ -40,6 +41,7 @@ export class UsersService {
     return this.prismaService.user.create({
       data: {
         email: createUserDto.email,
+        name: createUserDto.name ?? null,
         password: await this.hash(createUserDto.password),
         role: 'USER',
       },
@@ -121,6 +123,59 @@ export class UsersService {
       where: { email },
       omit: { password: false },
     });
+  }
+
+  /**
+   * Shape enxuto consumido pelo frontend. Os identificadores da Stripe ficam
+   * de fora de proposito: sao chaves internas de correlacao dos webhooks e
+   * nao tem uso no cliente.
+   */
+  async getProfile(id: string) {
+    const user = await this.findOne(id);
+
+    return {
+      name: user.name,
+      email: user.email,
+      plan: user.plan,
+      credits: user.credits,
+      subscriptionStatus: user.subscriptionStatus,
+      isVerified: user.isVerified,
+    };
+  }
+
+  async updateProfile(id: string, data: { name?: string }) {
+    await this.prismaService.user.update({
+      where: { id },
+      data: { ...(data.name !== undefined && { name: data.name }) },
+    });
+
+    return this.getProfile(id);
+  }
+
+  /** Troca de senha pelo proprio usuario: exige conferir a senha atual. */
+  async changePassword(
+    id: string,
+    currentPassword: string,
+    newPassword: string,
+  ) {
+    const user = await this.prismaService.user.findUnique({
+      where: { id },
+      omit: { password: false },
+    });
+
+    if (!user) {
+      throw new NotFoundException('User not found');
+    }
+
+    const matches = await bcrypt.compare(currentPassword, user.password);
+
+    if (!matches) {
+      throw new UnauthorizedException('Current password is incorrect');
+    }
+
+    await this.setPassword(id, newPassword);
+
+    return { message: 'Password updated' };
   }
 
   private hash(plainPassword: string) {
