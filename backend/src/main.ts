@@ -3,7 +3,10 @@ import { AppModule } from './app.module';
 import { configureApp } from './app.setup';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  // rawBody: true preserva os bytes originais do corpo em req.rawBody. O
+  // webhook da Stripe calcula a assinatura sobre o payload exato — um corpo
+  // parseado e re-serializado nao bate.
+  const app = await NestFactory.create(AppModule, { rawBody: true });
 
   configureApp(app);
 

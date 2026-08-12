@@ -58,4 +58,35 @@ describe('validateEnv', () => {
 
     expect(validateEnv(config)).toBe(config);
   });
+
+  describe('grupo da Stripe (tudo ou nada)', () => {
+    const stripe = () => ({
+      STRIPE_SECRET_KEY: 'sk_test_123',
+      STRIPE_WEBHOOK_SECRET: 'whsec_123',
+      STRIPE_PRICE_ID_STANDARD: 'price_a',
+      STRIPE_PRICE_ID_PRO: 'price_b',
+    });
+
+    it('aceita nenhuma variavel da Stripe (pagamentos desligados)', () => {
+      expect(() => validateEnv(valid())).not.toThrow();
+    });
+
+    it('aceita o grupo completo', () => {
+      expect(() => validateEnv({ ...valid(), ...stripe() })).not.toThrow();
+    });
+
+    it.each([
+      'STRIPE_SECRET_KEY',
+      'STRIPE_WEBHOOK_SECRET',
+      'STRIPE_PRICE_ID_STANDARD',
+      'STRIPE_PRICE_ID_PRO',
+    ])('falha com o grupo pela metade, faltando %s', (key) => {
+      const config = { ...valid(), ...stripe() };
+      delete (config as Record<string, unknown>)[key];
+
+      // Meia configuracao aceita checkout e nunca libera o plano — o boot
+      // precisa quebrar antes de o primeiro cliente pagar.
+      expect(() => validateEnv(config)).toThrow(key);
+    });
+  });
 });

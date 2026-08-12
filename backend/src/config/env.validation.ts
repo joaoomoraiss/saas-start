@@ -1,3 +1,5 @@
+import { PRICE_ENV_KEYS } from 'src/payments/plan.config';
+
 const REQUIRED = [
   'DATABASE_URL',
   'JWT_SECRET',
@@ -15,6 +17,21 @@ const SECRETS = [
 ] as const;
 
 const MIN_SECRET_LENGTH = 32;
+
+/**
+ * Grupo da Stripe: tudo-ou-nada.
+ *
+ * Pagamentos sao opcionais num boilerplate — sem STRIPE_SECRET_KEY o modulo
+ * sobe e as rotas respondem 503. O que nao pode existir e configuracao pela
+ * METADE: uma chave sem o segredo do webhook aceita checkout e nunca libera o
+ * plano, e isso so aparece depois do primeiro cliente pagar. Por isso, se
+ * qualquer variavel do grupo estiver presente, todas passam a ser exigidas.
+ */
+const STRIPE_GROUP = [
+  'STRIPE_SECRET_KEY',
+  'STRIPE_WEBHOOK_SECRET',
+  ...PRICE_ENV_KEYS,
+] as const;
 
 /**
  * Validacao de ambiente executada no boot, antes de qualquer requisicao.
@@ -59,6 +76,19 @@ export function validateEnv(config: Record<string, unknown>) {
     } else {
       used.set(value, key);
     }
+  }
+
+  const stripeConfigured = STRIPE_GROUP.filter((key) => config[key]);
+
+  if (
+    stripeConfigured.length &&
+    stripeConfigured.length < STRIPE_GROUP.length
+  ) {
+    const missing = STRIPE_GROUP.filter((key) => !config[key]);
+    errors.push(
+      `configuracao da Stripe incompleta: falta ${missing.join(', ')}. ` +
+        `Defina todas as variaveis do grupo ou nenhuma (pagamentos desligados).`,
+    );
   }
 
   if (errors.length) {

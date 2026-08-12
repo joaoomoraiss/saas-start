@@ -1,7 +1,7 @@
 {
-  "name": "fakedoor-boilerplate",
+  "name": "saas-start-backend",
   "version": "0.0.1",
-  "description": "",
+  "description": "SaaS boilerplate API: auth, users, mail, RBAC/CASL and Stripe subscriptions.",
   "author": "",
   "private": true,
   "license": "UNLICENSED",
@@ -40,7 +40,8 @@
     "dotenv": "^17.2.3",
     "nodemailer": "^7.0.12",
     "reflect-metadata": "^0.2.2",
-    "rxjs": "^7.8.1"
+    "rxjs": "^7.8.1",
+    "stripe": "^22.5.0"
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",

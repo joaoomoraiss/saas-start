@@ -6,6 +6,7 @@ import { CaslModule } from './casl/casl.module';
 import { validateEnv } from './config/env.validation';
 import { MailModule } from './mail/mail.module';
 import { MailerModule } from './mailer/mailer.module';
+import { PaymentsModule } from './payments/payments.module';
 import { PrismaModule } from './prisma/prisma.module';
 import { UsersModule } from './users/users.module';
 
@@ -26,6 +27,7 @@ import { UsersModule } from './users/users.module';
     AuthModule,
     MailerModule,
     MailModule,
+    PaymentsModule,
   ],
   controllers: [],
   providers: [],
