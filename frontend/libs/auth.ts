@@ -9,20 +9,24 @@ export interface Session {
 }
 
 /**
- * Valida a assinatura do JWT e devolve a sessão contida nele.
+ * Valida a assinatura do cookie `refreshToken` e devolve a sessão contida nele.
  * Retorna null quando o token é ausente, inválido ou expirado — os callers
  * tratam null como "não autenticado".
  *
- * Só use no servidor: depende de JWT_SECRET, que não é exposto ao browser.
+ * ⚠️ Usa JWT_REFRESH_SECRET, não JWT_SECRET. O backend assina cada tipo de
+ * token com um secret próprio (src/auth/token.service.ts) e o boot dele recusa
+ * secrets repetidos — validar com o secret errado reprova todo mundo.
+ *
+ * Só use no servidor: o secret não pode ser exposto ao browser.
  */
 export async function verifyJwtToken(
   token: string | null,
 ): Promise<Session | null> {
   try {
-    const jwtSecret = process.env.JWT_SECRET;
+    const jwtSecret = process.env.JWT_REFRESH_SECRET;
 
     if (!jwtSecret) {
-      console.error("JWT_SECRET is not defined");
+      console.error("JWT_REFRESH_SECRET is not defined");
       return null;
     }
 
@@ -31,7 +35,15 @@ export async function verifyJwtToken(
     }
 
     const secret = new TextEncoder().encode(jwtSecret);
-    const { payload } = await jwtVerify(token, secret);
+    const { payload } = await jwtVerify(token, secret, {
+      algorithms: ["HS256"],
+    });
+
+    // O backend carimba o propósito do token em `typ`. Conferir aqui fecha a
+    // porta para um token de outro tipo que porventura use o mesmo secret.
+    if (payload.typ !== "refresh") {
+      return null;
+    }
 
     // Um token válido sem `role` continua sendo uma sessão válida: assume o
     // menor privilégio em vez de tratar como não autenticado.

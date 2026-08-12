@@ -109,6 +109,10 @@ Revise com advogado antes de publicar qualquer projeto.
 
 ## 7. O fluxo de pagamento não foi testado contra a Stripe de verdade
 
+**Combinado:** você passa a chave depois. Esta é a única pendência que precisa
+de credencial — nada mais no projeto depende dela.
+
+
 A regra de negócio está coberta por 40 testes unitários com o SDK mockado, e a
 superfície HTTP por 20 testes e2e (guards, IDOR, rejeição de webhook não
 assinado). Mas nenhuma chamada real à Stripe foi feita — não tenho credencial e

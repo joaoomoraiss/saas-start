@@ -118,6 +118,46 @@ Contrato frontend↔backend:
 13. `API_ROUTES.md` afirmava que **não** havia `ValidationPipe` global e que
     `POST /user` e `GET /user/:id` eram públicas. As três coisas eram falsas.
 
+## Parte 3 — Revisão final: três defeitos que impediam o clone de funcionar
+
+Ao revisar se restava algo, apareceram problemas que nenhum teste pegava porque
+ninguém tinha rodado as duas pontas juntas.
+
+### 1. A área logada estava quebrada incondicionalmente
+
+O backend assina o cookie `refreshToken` com `JWT_REFRESH_SECRET`
+(`SECRET_ENV` em `token.service.ts`), mas o `proxy.ts` validava esse cookie com
+`JWT_SECRET`. Como o `validateEnv` do backend **recusa secrets repetidos**, não
+existia configuração em que isso funcionasse: login → cookie → `/dashboard` →
+assinatura reprovada → volta para `/login`, em loop.
+
+Corrigido em `libs/auth.ts` (usa `JWT_REFRESH_SECRET`, fixa `algorithms:
+["HS256"]` e confere o claim `typ === "refresh"`). Verificado assinando um
+token igual ao do backend: com `JWT_SECRET` dá
+`ERR_JWS_SIGNATURE_VERIFICATION_FAILED`; com o de refresh, passa.
+
+### 2. Confirmação de e-mail não tinha para onde ir
+
+O backend manda `${FRONTEND_URL}/confirm?token=...`, e essa rota não existia —
+o link dava 404. `confirmEmail()` estava em `services/user` como código morto.
+
+Criada a página `/confirm` e adicionada a `publicRoutes` do proxy. Esse segundo
+passo importa tanto quanto o primeiro: o proxy é fail-closed, então sem
+declarar a rota o link seria redirecionado para `/login` mesmo com a página
+existindo. Entra como `whenAuthenticated: "next"` porque o caso comum é o
+usuário já estar logado e sem e-mail confirmado.
+
+### 3. Portas conflitantes nos exemplos
+
+`backend/.env.example` trazia `PORT=3000` e o frontend apontava
+`NEXT_PUBLIC_BACKEND_URL` para a 3000 — mas o `next dev` também usa a 3000.
+Seguindo o README, os dois brigavam pela mesma porta. E `FRONTEND_URL` estava
+em `http://localhost:5173` (default do Vite, herdado do boilerplate original),
+então os links de e-mail apontariam para lugar nenhum.
+
+Backend na 8080 (a porta que o `API_ROUTES.md` já documentava), frontend na
+3000, `FRONTEND_URL` batendo com o frontend.
+
 ## Verificação
 
 | Suíte | Resultado |
@@ -125,8 +165,9 @@ Contrato frontend↔backend:
 | backend `npm test` (unitário) | 185 passando, 17 suítes |
 | backend `npm run test:e2e` | 79 passando, 3 suítes |
 | backend `npm run lint:check` | limpo |
-| frontend `npm run build` | 18 rotas |
+| frontend `npm run build` | 19 rotas |
 | frontend `npm run lint` | limpo |
+| frontend `tsc --noEmit` | limpo |
 
 `tsc --noEmit` do backend acusa só um erro pré-existente em
 `test/setup/test-app.ts` (import dinâmico que o jest resolve em runtime).

@@ -33,8 +33,17 @@ npm install
 npm run dev
 ```
 
-`JWT_SECRET` precisa ser idêntico nos dois lados: o `proxy.ts` valida o
-refreshToken localmente para proteger as rotas privadas.
+O backend sobe na **8080** e o frontend na **3000**.
+
+`JWT_REFRESH_SECRET` precisa ser idêntico nos dois lados — repare que é o
+secret de *refresh*, não o `JWT_SECRET`. O `proxy.ts` valida o cookie
+`refreshToken` localmente para proteger as rotas privadas, e é com esse secret
+que o backend assina o cookie. Cada tipo de token tem o seu (o boot do backend
+recusa secrets repetidos).
+
+`FRONTEND_URL` no backend precisa apontar para onde o Next está servindo: é a
+base dos links de confirmação de e-mail (`/confirm?token=`) e de reset de senha
+(`/reset-password?token=`).
 
 ## Pagamentos (Stripe)
 

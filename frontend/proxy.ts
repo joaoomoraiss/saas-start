@@ -24,6 +24,9 @@ const publicRoutes: readonly PublicRoute[] = [
   { path: "/register", whenAuthenticated: "redirect" },
   { path: "/forgot-password", whenAuthenticated: "redirect" },
   { path: "/reset-password", whenAuthenticated: "redirect" },
+  // "next" e nao "redirect": o caso comum e o usuario ja estar logado e sem
+  // e-mail confirmado. Redirecionar aqui inutilizaria o link do e-mail.
+  { path: "/confirm", whenAuthenticated: "next" },
   { path: "/", whenAuthenticated: "next" },
   { path: "/plans", whenAuthenticated: "next" },
   { path: "/sobre", whenAuthenticated: "next" },
