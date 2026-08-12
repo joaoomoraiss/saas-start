@@ -1,0 +1,199 @@
+@import "tailwindcss";
+
+/* ============================================================
+   Design system (ver .claude/skills/DESIGN.md)
+   Monochrome editorial chrome + oversized pastel color blocks.
+   Roxo (#533AFD) is the single brand accent (one promo CTA / page).
+   Figma palette (#F24E1E / #FF7262 / #A259FF / #1ABCFE / #0ACF83)
+   is used ONLY for small decorative accents (swatches, bars, filmstrip).
+   ============================================================ */
+
+@theme inline {
+  /* Core monochrome */
+  --color-ink: #000000;
+  --color-canvas: #ffffff;
+  --color-inverse-canvas: #000000;
+  --color-inverse-ink: #ffffff;
+
+  /* Hairlines & soft surfaces */
+  --color-hairline: #e6e6e6;
+  --color-hairline-soft: #f1f1f1;
+  --color-surface-soft: #f7f7f5;
+
+  /* Pastel color blocks */
+  --color-block-lime: #dceeb1;
+  --color-block-lilac: #c5b0f4;
+  --color-block-cream: #f4ecd6;
+  --color-block-pink: #efd4d4;
+  --color-block-mint: #c8e6cd;
+  --color-block-coral: #f3c9b6;
+  --color-block-navy: #1f1d3d;
+
+  /* Single brand accent (replaces magenta promo) */
+  --color-accent: #533afd;
+  --color-accent-pressed: #4730e0;
+  --color-success: #1ea64a;
+
+  /* Figma palette — decorative accents only */
+  --color-fig-red: #f24e1e;
+  --color-fig-orange: #ff7262;
+  --color-fig-purple: #a259ff;
+  --color-fig-blue: #1abcfe;
+  --color-fig-green: #0acf83;
+
+  /* Radius scale */
+  --radius-xs: 2px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 24px;
+  --radius-xl: 32px;
+  --radius-pill: 50px;
+
+  /* Type families (next/font variables set in layout.tsx) */
+  --font-sans: var(--font-inter), "SF Pro Display", system-ui, helvetica,
+    sans-serif;
+  --font-mono: var(--font-jetbrains), "SF Mono", menlo, monospace;
+
+  /* Animations */
+  --animate-marquee: marquee 30s linear infinite;
+}
+
+:root {
+  --background: #ffffff;
+  --foreground: #000000;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  font-feature-settings: "kern";
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------- Typographic roles (DESIGN.md) ---------- */
+.display-xl {
+  font-size: clamp(32px, 5.2vw, 54px);
+  font-weight: 350;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+}
+.display-lg {
+  font-size: clamp(34px, 6vw, 64px);
+  font-weight: 350;
+  line-height: 1.08;
+  letter-spacing: -0.015em;
+}
+.eyebrow {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+}
+.caption-mono {
+  font-family: var(--font-mono);
+  text-transform: uppercase;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+}
+
+/* ---------- Legal / content prose (sobre, contato, políticas, termos) ---------- */
+.legal-prose h2 {
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--color-ink);
+  margin-top: 2.25rem;
+  margin-bottom: 0.5rem;
+}
+.legal-prose h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--color-ink);
+  margin-top: 1.5rem;
+  margin-bottom: 0.25rem;
+}
+.legal-prose p {
+  color: color-mix(in srgb, var(--color-ink) 72%, transparent);
+  line-height: 1.7;
+}
+.legal-prose ul {
+  list-style: disc;
+  padding-left: 1.25rem;
+  color: color-mix(in srgb, var(--color-ink) 72%, transparent);
+}
+.legal-prose li {
+  margin-top: 0.4rem;
+  line-height: 1.6;
+}
+.legal-prose a {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.legal-prose strong {
+  color: var(--color-ink);
+  font-weight: 600;
+}
+
+/* ---------- Keyframes ---------- */
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(16px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes marquee {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-50%);
+  }
+}
+
+/* Equalizer / waveform bars */
+@keyframes bars {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+
+/* Sweep a color highlight across the headline underline */
+@keyframes sweep {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+  }
+}
