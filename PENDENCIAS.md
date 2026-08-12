@@ -1,33 +1,42 @@
 # Pendências
 
-Decisões que precisam de você. Registradas em 12/08/2026.
+Decisões que precisam de você. Atualizado em 12/08/2026.
 
 ---
 
-## 1. Push bloqueado — a chave SSH desta máquina não está no GitHub
+## 1. Push bloqueado — a chave SSH tem passphrase e não há agent
 
-`git remote add origin git@github.com:joaoomoraiss/saas-start.git` foi feito, o
-commit está pronto, mas o push falha:
+Corrigindo o que eu tinha escrito antes: **sua chave está cadastrada no GitHub
+sim**. O problema é outro.
 
-```
-git@github.com: Permission denied (publickey).
-```
-
-A chave `~/.ssh/id_ed25519` é oferecida e o GitHub recusa — ela não está
-cadastrada na sua conta. Não mexi em credencial nem gerei chave nova.
-
-Para resolver, cadastre a chave pública em <https://github.com/settings/keys>:
+`~/.ssh/id_ed25519` é uma chave criptografada (`aes256-ctr` + `bcrypt` KDF), ou
+seja, protegida por passphrase. Não existe `ssh-agent` rodando nesta sessão:
 
 ```
-ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPiZBSVdoWN4FtiBfJGmow/urEN+DmQB2DxHxePelteP jooaommorais@gmail.com
+$ ssh-add -l
+Could not open a connection to your authentication agent
 ```
 
-Depois:
+Então o ssh oferece a chave pública, o GitHub aceita e pede a prova, o ssh
+tenta ler a chave privada, não consegue descriptografar sem a passphrase, e
+como não há terminal interativo para perguntar, cai em
+`Permission denied (publickey)`.
 
-```bash
-cd ~/projects/saas-start
-git push -u origin feat/saas-boilerplate
+Eu não consigo destravar isso: qualquer comando meu roda sem tty e não tem como
+receber a passphrase. **Você resolve rodando o push direto na sessão**, que aí
+o prompt aparece:
+
 ```
+! git push -u origin feat/saas-boilerplate
+```
+
+Ou carregando a chave num agent antes:
+
+```
+eval "$(ssh-agent -s)" && ssh-add ~/.ssh/id_ed25519
+```
+
+O remote `origin` já está configurado e os commits estão prontos.
 
 ## 2. Commit ficou em branch, não na `main`
 
@@ -43,33 +52,24 @@ git push -u origin main
 Deixei a decisão com você porque não dá para reverter um `push` na `main` de um
 repo público sem reescrever histórico.
 
-## 3. O backend deste repo NÃO atende o que o frontend chama
+## 3. A migração de banco ainda não foi aplicada em lugar nenhum
 
-Este é o gap mais importante. Você pediu para atualizar o frontend nesta
-sessão, então **não toquei no backend** — mas eles não conversam ainda.
+Criei `prisma/migrations/20260812120000_billing/` (campos de billing no `User`
++ tabela `Payment`). Ela é **puramente aditiva** — só `ADD COLUMN`, `CREATE
+TABLE` e índices, nada de `DROP` ou alteração de coluna existente.
 
-O frontend (`services/user`, `services/payments`) espera:
+Ela foi validada de verdade: a suíte e2e aplica as migrations reais contra um
+Postgres em memória (PGlite) e passa. Mas **nenhum banco seu foi tocado** — não
+rodei `prisma migrate deploy` em desenvolvimento nem em produção.
 
-| Chamada do frontend | Existe no backend? |
-|---|---|
-| `POST /auth/*` (register, login, confirm, verify-email, forgot/reset-password, refresh-token, logout) | ✅ sim, tudo bate |
-| `GET /user/profile` | ❌ o controller é `@Controller('users')` e não tem rota `profile` |
-| `PATCH /user/profile`, `PATCH /user/password` | ❌ não existem |
-| `POST /payments/checkout`, `POST /payments/cancel`, `GET /payments/user` | ❌ não há módulo de pagamentos |
+Quando quiser aplicar:
 
-E o `model User` do Prisma só tem `id, email, password, role, isVerified,
-createdAt, updatedAt`. Faltam os campos que o frontend lê: `name`, `plan`,
-`credits`, `subscriptionStatus`, `stripeCustomerId`, `stripeSubscriptionId`.
+```bash
+cd backend && npx prisma migrate deploy
+```
 
-**Consequência prática:** hoje o fluxo de auth funciona ponta a ponta; o
-dashboard, o /settings, o /plans e o /success quebram na chamada ao perfil.
-
-`docs/PAYMENT_ARCHITECTURE.md` descreve exatamente a arquitetura a implementar
-(modelo de dados, webhook idempotente, tabela `Payment`). O contrato que o
-frontend espera está em `frontend/.claude/skills/API_ROUTES.md` §3 e §4.
-
-Não comecei porque envolve **migração de banco** — está na sua lista de "pare e
-registre".
+Se você já tinha um banco de dev com dados, confira antes — é aditiva, então
+não deve haver perda, mas a decisão de rodar é sua.
 
 ## 4. Os `.git` aninhados foram movidos, não apagados
 
@@ -92,14 +92,45 @@ precisa mais, pode apagar a pasta de backup.
 entraram no commit deste repo, mas se você quiser levá-las de volta para o
 `fakedoor-boilerplate`, precisa restaurar o `.git` do backup antes.
 
-## 5. Páginas legais são rascunho genérico
+## 5. `/users` virou `/user` (breaking change)
+
+O controller respondia em `/users`, mas o frontend e o `API_ROUTES.md` sempre
+falaram `/user`. Alinhei o backend para `/user` — é a URL que o resto do mundo
+já esperava.
+
+Se você tiver algum cliente antigo apontando para `/users`, ele quebra. Os
+testes e2e foram atualizados junto.
+
+## 6. Páginas legais são rascunho genérico
 
 `/termos-de-uso`, `/politica-de-privacidade` e `/politica-de-cookies` têm texto
 neutro de placeholder. Servem de estrutura, **não** de documento jurídico.
 Revise com advogado antes de publicar qualquer projeto.
 
-## 6. Backend ainda não foi genericizado
+## 7. O fluxo de pagamento não foi testado contra a Stripe de verdade
 
-Fora do escopo desta sessão. Sobrou lá: `model Email` com `enum Buttons
-{ COMMON, BUY }` (parece resto do fakedoor), o nome do package e o README padrão
-do Nest. Os testes do backend eu não rodei — precisam de PostgreSQL de pé.
+A regra de negócio está coberta por 40 testes unitários com o SDK mockado, e a
+superfície HTTP por 20 testes e2e (guards, IDOR, rejeição de webhook não
+assinado). Mas nenhuma chamada real à Stripe foi feita — não tenho credencial e
+não criaria conta/custo sem você pedir.
+
+Antes de confiar em produção, rode o caminho completo com o Stripe CLI:
+
+```bash
+stripe listen --forward-to localhost:8080/payments/webhook
+stripe trigger checkout.session.completed
+stripe trigger invoice.payment_succeeded
+```
+
+O que eu mais gostaria de ver confirmado com evento real é o `planFromInvoice`:
+ele lê `invoice.lines.data[0].pricing.price_details.price`, um caminho que
+mudou de lugar nas versões recentes da API. Se vier `null`, o código cai no
+plano atual do usuário (não quebra), mas a renovação creditaria a cota errada
+se o usuário tivesse trocado de plano.
+
+## 8. Sobras do fakedoor no backend
+
+`model Email` com `enum Buttons { COMMON, BUY }` e o `MailController` que grava
+e-mails parecem resto do projeto fakedoor, não de um boilerplate de SaaS. Não
+removi porque apagar tabela é migração destrutiva. Se não usa, vale um
+`DROP TABLE` numa migration futura.

@@ -19,7 +19,7 @@ description: Use SEMPRE que for construir, integrar ou debugar o FRONTEND, ou qu
 | **Base URL (dev)** | `http://localhost:8080` (`.env` define `PORT=8080`; se ausente, o Nest cai em `3000`) |
 | **Base URL (prod)** | domínio de produção |
 | **Prefixo global** | ❌ **Nenhum** — as rotas ficam na raiz (NÃO existe `/api`) |
-| **CORS** | `origin: http://localhost:3000` (dev) / `https://www.livemotion.com` (prod), `credentials: true` |
+| **CORS** | `origin: FRONTEND_URL` (env), `credentials: true` |
 | **Headers permitidos** | `Content-Type`, `Authorization` |
 | **Métodos permitidos** | GET, POST, PUT, PATCH, DELETE, OPTIONS |
 
@@ -27,8 +27,8 @@ description: Use SEMPRE que for construir, integrar ou debugar o FRONTEND, ou qu
 - O backend lê o token **do header** `Authorization: Bearer <accessToken>`.
   ⚠️ Apesar de o login também gravar um cookie `refreshToken`, **as rotas protegidas NÃO leem o
   cookie** — você precisa mandar o `accessToken` no header em toda requisição autenticada.
-- `accessToken` (chamado `token` nas responses) expira em **7 dias**.
-- `refreshToken` expira em **30 dias** e é gravado como cookie `httpOnly` (você não consegue lê-lo
+- `accessToken` (chamado `token` nas responses) expira conforme `ACCESS_TOKEN_TTL` (default **15m**).
+- `refreshToken` expira conforme `REFRESH_TOKEN_TTL_DAYS` (default **30 dias**) e é gravado como cookie `httpOnly` (você não consegue lê-lo
   via JS; ele é reenviado automaticamente para `POST /auth/refresh-token` por causa do `credentials`).
 - **Faça `fetch`/`axios` com `credentials: 'include'` / `withCredentials: true`** para o cookie ir/voltar.
 
@@ -36,24 +36,26 @@ description: Use SEMPRE que for construir, integrar ou debugar o FRONTEND, ou qu
 | Guard | Significado para o frontend |
 |---|---|
 | `AuthGuard` | Precisa de `Authorization: Bearer <token>` válido. Sem ele → **401**. |
-| `MailGuard` | Precisa que o usuário tenha `isVerified: true` (email confirmado). Senão → **403 "Email not verified"**. |
+| `VerifiedEmailGuard` | Precisa que o usuário tenha `isVerified: true` (email confirmado). Senão → **403 "Email not verified"**. Vale mesmo com `REQUIRE_EMAIL_VERIFICATION=false`. |
 | `RoleGuard` + `@RequiredRoles(...)` | Precisa de role específica (ex.: `ADMIN`). Senão → **403**. |
 
 ### ⚠️ Validação de input (importante)
-Não há `ValidationPipe` global registrado no `main.ts`. **Os decorators `class-validator` dos DTOs
-NÃO são aplicados em runtime.** Ou seja: o backend não rejeita payload malformado automaticamente —
-trate as regras abaixo como o **contrato que o frontend deve respeitar** (validação client-side),
-não como uma garantia do servidor.
+Há um `ValidationPipe` global (`src/app.setup.ts`) com `whitelist`, `forbidNonWhitelisted` e
+`transform`. Na prática:
+- os decorators `class-validator` dos DTOs **são** aplicados em runtime — payload inválido volta **400**;
+- mandar um campo que o DTO não declara **também** dá 400 (não é ignorado silenciosamente).
+
+Continue validando no cliente para dar feedback rápido, mas o servidor é a garantia.
 
 ### Shapes base dos models (referência das responses)
 
-**User** (retornado cru em algumas rotas — ⚠️ inclui `password` hasheado; não exiba):
+**User** (retornado cru em algumas rotas). O hash de senha é omitido no nível do client
+Prisma, então **não** vem nessas responses:
 ```ts
 {
   id: string;            // uuid
-  name: string;          // default "New User"
+  name: string | null;   // opcional no cadastro
   email: string;
-  password: string;      // hash bcrypt — IGNORE no frontend
   role: "USER" | "ADMIN";
   isVerified: boolean;
   stripeCustomerId: string | null;
@@ -167,13 +169,15 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
 
 ## 3. User — `/user`
 
-### `POST /user` — criar usuário (público, sem guard)
+### `POST /user` — criar usuário (AuthGuard + ADMIN)
 > Prefira `POST /auth/register` no fluxo normal (este não dispara email de confirmação).
 - **Body** (`CreateUserDto`):
   ```ts
-  { name: string; email: string; password: string; role: "USER" | "ADMIN" }
+  { email: string; password: string; name?: string }
   ```
-- **Response 201:** objeto **User** (⚠️ note: o service salva `email`, `password`, `role` — `name` cai no default).
+  ⚠️ `role` **não** é aceito: promover a ADMIN é estado de segurança, não campo de formulário.
+  Mandá-lo dá 400 (`forbidNonWhitelisted`).
+- **Response 201:** objeto **User** (a role sai sempre como `"USER"`).
 - **Erros:** `422` se email já existe.
 
 ### `GET /user/profile` — perfil do usuário logado ⭐
@@ -182,7 +186,7 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
 - **Response 200** (shape enxuto e seguro — sem password):
   ```ts
   {
-    name: string;
+    name: string | null;
     email: string;
     plan: "FREE" | "STANDARD" | "PRO";
     credits: number;
@@ -194,7 +198,7 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
 - **Erros:** `401` sem token; `404` usuário não encontrado.
 
 ### `PATCH /user/profile` — editar o PRÓPRIO perfil ⭐
-- **Guards:** `AuthGuard` + `MailGuard` (login + email verificado).
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard` (login + email verificado).
 - **Request:** `Authorization: Bearer <token>`. O id do usuário vem **do token**, NÃO do corpo nem da URL.
 - **Body** (`UpdateProfileDto`): `{ name?: string }` — hoje só `name` é editável (por segurança, não dá
   para alterar `role`/`isVerified`/`email` por aqui).
@@ -204,7 +208,7 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
   nome — o frontend manda só `{ name }`, sem precisar saber o próprio id.
 
 ### `PATCH /user/password` — trocar a PRÓPRIA senha 🔒
-- **Guards:** `AuthGuard` + `MailGuard` (login + email verificado).
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard` (login + email verificado).
 - **Request:** `Authorization: Bearer <token>`. O id vem **do token** — o usuário só troca a própria senha.
 - **Body** (`ChangePasswordDto`):
   ```ts
@@ -224,16 +228,16 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
   > outros dispositivos seria preciso versionar tokens — fora do escopo atual.
 
 ### `GET /user` — listar todos
-- **Guards:** `AuthGuard` + `RoleGuard` + `MailGuard`, `@RequiredRoles(ADMIN, USER)`.
+- **Guards:** `AuthGuard` + `RoleGuard` + `VerifiedEmailGuard`, `@RequiredRoles(ADMIN, USER)`.
 - **Response 200:** `User[]` (objetos completos, ⚠️ incluem `password` hash).
 
-### `GET /user/:id` — buscar por id (público, sem guard)
+### `GET /user/:id` — buscar por id (AuthGuard + CASL: dono ou ADMIN)
 - **Param:** `id` (uuid).
 - **Response 200:** objeto **User** completo.
 - **Erros:** `404` `"User not found"`.
 
 ### `PATCH /user/:id` — atualizar qualquer usuário (somente ADMIN)
-- **Guards:** `AuthGuard` + `RoleGuard` + `MailGuard`, `@RequiredRoles(ADMIN)`.
+- **Guards:** `AuthGuard` + `RoleGuard` + `VerifiedEmailGuard`, `@RequiredRoles(ADMIN)`.
   ⚠️ Mudou: antes aceitava `USER` (um usuário podia editar outro / se promover a ADMIN). Agora é
   **só ADMIN**. Para o usuário editar a si mesmo, use `PATCH /user/profile`.
 - **Param:** `id` (uuid).
@@ -246,7 +250,7 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
 - **Erros:** `403` se não for admin; `404` se não existir.
 
 ### `DELETE /user/:id`
-- **Guards:** `AuthGuard` + `RoleGuard` + `MailGuard`, `@RequiredRoles(ADMIN)` (só admin).
+- **Guards:** `AuthGuard` + `RoleGuard` + `VerifiedEmailGuard`, `@RequiredRoles(ADMIN)` (só admin).
 - **Param:** `id` (uuid).
 - **Response 200:** objeto **User** deletado.
 - **Erros:** `404` se não existir.
@@ -267,11 +271,11 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
 - Todo usuário novo nasce `FREE` com `credits: 0`.
 
 > **Auth:** todas as rotas de `/payments` exigem **login + email verificado** (`AuthGuard` +
-> `MailGuard`), **exceto** o `webhook` (público, chamado pela Stripe). As rotas de **admin** abaixo
+> `VerifiedEmailGuard`), **exceto** o `webhook` (público, chamado pela Stripe). As rotas de **admin** abaixo
 > acrescentam `RoleGuard` + `@RequiredRoles(ADMIN)`.
 
 ### `POST /payments/checkout` — assinar / fazer upgrade
-- **Guards:** `AuthGuard` + `MailGuard`.
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard`.
 - **Body:** `{ plan: "STANDARD" | "PRO" }`  *(enum `Plan` do Prisma; `FREE` é rejeitado)*
 - **Response 200/201:** `{ url: string }` — **redirecione o navegador** para essa URL do Stripe Checkout.
 - **Erros:**
@@ -285,7 +289,7 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
   refletirem a compra.
 
 ### `POST /payments/cancel` — cancelar assinatura
-- **Guards:** `AuthGuard` + `MailGuard`.
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard`.
 - **Request:** sem body.
 - **Efeito:** cancela no Stripe, `subscriptionStatus = "canceled"` e volta para `plan = "FREE"`
   (créditos já acumulados permanecem).
@@ -293,24 +297,24 @@ Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de bo
 - **Erros:** `401` sem token; `403` email não verificado; `400` `"User has no active subscription"`.
 
 ### `GET /payments/user` — MINHAS cobranças ⭐
-- **Guards:** `AuthGuard` + `MailGuard` (qualquer usuário logado + verificado).
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard` (qualquer usuário logado + verificado).
 - **Request:** `Authorization: Bearer <token>`.
 - **Response 200:** `Payment[]` do usuário logado, ordenado por `paidAt desc` (mais recente primeiro).
 - **Use esta** para a tela "Histórico de pagamentos / Faturas" do usuário (com link de recibo).
 
 ### `GET /payments/user/:userId` — cobranças de um usuário (ADMIN)
-- **Guards:** `AuthGuard` + `MailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
 - **Param:** `userId` (uuid).
 - **Response 200:** `Payment[]` daquele usuário, `paidAt desc`.
 - **Erros:** `403` se não for admin.
 
 ### `GET /payments` — todas as cobranças (ADMIN)
-- **Guards:** `AuthGuard` + `MailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
 - **Response 200:** `Payment[]` (todas), `paidAt desc`.
 - **Erros:** `403` se não for admin.
 
 ### `DELETE /payments/:id` — apagar um registro (ADMIN)
-- **Guards:** `AuthGuard` + `MailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
+- **Guards:** `AuthGuard` + `VerifiedEmailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
 - **Param:** `id` (uuid do Payment).
 - **Response 200:** objeto **Payment** removido.
 - **Erros:** `403` se não for admin; `404` `"Payment not found"`.

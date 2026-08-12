@@ -3,7 +3,8 @@ import api from "@/libs/api";
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface UserProfile {
-  name: string;
+  /** null enquanto o usuario nao preencheu o nome (o cadastro nao exige). */
+  name: string | null;
   email: string;
   plan: "FREE" | "STANDARD" | "PRO";
   credits: number;
@@ -12,12 +13,12 @@ export interface UserProfile {
   isVerified: boolean;
 }
 
-// POST /auth/login devolve { token, refreshToken }.
-// `token` é o accessToken (7d) — guarde-o e mande no header Authorization.
-// `refreshToken` (30d) também é gravado como cookie httpOnly.
+// POST /auth/login devolve apenas { token }.
+// `token` é o accessToken — mande no header Authorization.
+// O refreshToken NÃO vem no corpo: ele é gravado como cookie httpOnly, para
+// que JavaScript nenhum consiga lê-lo. Quem o usa é o proxy.ts (server-side).
 export interface AuthResponse {
   token: string;
-  refreshToken: string;
 }
 
 // ─── Profile ──────────────────────────────────────────────────────────────────

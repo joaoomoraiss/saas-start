@@ -5,7 +5,8 @@ assinatura via Stripe, landing page e páginas legais já prontas. Clone,
 troque a marca e comece pelo domínio do produto.
 
 ```
-backend/    NestJS + Prisma + PostgreSQL  (auth, users, mail, CASL, roles)
+backend/    NestJS + Prisma + PostgreSQL
+            auth, users, mail, CASL/roles, assinaturas Stripe
 frontend/   Next.js 16 (App Router) + Tailwind v4
 docs/       Arquitetura de pagamentos (agnóstica de framework)
 ```
@@ -34,6 +35,33 @@ npm run dev
 
 `JWT_SECRET` precisa ser idêntico nos dois lados: o `proxy.ts` valida o
 refreshToken localmente para proteger as rotas privadas.
+
+## Pagamentos (Stripe)
+
+Opcional e **tudo ou nada**: sem `STRIPE_SECRET_KEY` a aplicação sobe normal e
+as rotas `/payments` respondem 503. Preencher só parte do grupo quebra o boot
+de propósito — meia configuração aceita checkout e nunca libera o plano.
+
+Para ligar, preencha as quatro variáveis em `backend/.env` e rode o listener:
+
+```bash
+stripe listen --forward-to localhost:8080/payments/webhook
+```
+
+O segredo que ele imprime (`whsec_...`) é o `STRIPE_WEBHOOK_SECRET`.
+
+Regras que valem a pena conhecer antes de mexer:
+
+- O **webhook é a única fonte de verdade**. A volta do usuário para `/success`
+  não prova pagamento — a página faz polling em `GET /user/profile`.
+- O cliente manda só o **nome do plano**; o Price ID é resolvido no backend a
+  partir da env. Nunca aceite preço vindo do request.
+- Créditos são concedidos em **um único caminho por cobrança**:
+  `checkout.session.completed` na assinatura inicial, `invoice.payment_succeeded`
+  só nas renovações (`subscription_cycle`). Creditar nos dois dá em dobro.
+
+Cotas e Price IDs por plano: `backend/src/payments/plan.config.ts`.
+A arquitetura completa está em `docs/PAYMENT_ARCHITECTURE.md`.
 
 ## Ao começar um projeto novo
 

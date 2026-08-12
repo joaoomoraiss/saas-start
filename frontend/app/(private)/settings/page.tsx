@@ -189,7 +189,7 @@ function SectionGeneral({
   onProfileUpdated: (p: UserProfile) => void;
 }) {
   // Profile (apenas o nome é editável; e-mail é somente leitura)
-  const [name, setName] = useState(profile.name);
+  const [name, setName] = useState(profile.name ?? "");
   const [profileErrors, setProfileErrors] = useState<ProfileErrors>({});
   const [profileLoading, setProfileLoading] = useState(false);
   const [profileSaved, setProfileSaved] = useState(false);
