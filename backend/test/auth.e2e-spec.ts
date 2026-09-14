@@ -301,5 +301,141 @@ describe('Auth (e2e)', () => {
 
       expect(extractCookie(response, 'refreshToken')).toMatch(/refreshToken=;/);
     });
+
+    // Apagar so o cookie deixaria o token valido por 30 dias.
+    it('revoga a sessao: o mesmo refresh token deixa de renovar', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      await http()
+        .post('/auth/logout')
+        .set('Cookie', auth.refreshCookie)
+        .expect(204);
+
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(401);
+    });
+  });
+
+  describe('sessoes persistidas', () => {
+    const cookieValue = (cookie: string) => cookie.split(';')[0].split('=')[1];
+
+    it('guarda so o hash do refresh token no banco', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      const sessions = await ctx.prisma.refreshToken.findMany({
+        where: { userId: auth.id },
+      });
+
+      expect(sessions).toHaveLength(1);
+      expect(sessions[0].tokenHash).not.toBe(cookieValue(auth.refreshCookie));
+      expect(sessions[0].tokenHash).toMatch(/^[a-f0-9]{64}$/);
+    });
+
+    it('aceita o token recem-rotacionado dentro da janela de graca', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(200);
+
+      // Resposta perdida na rede / duas abas renovando juntas.
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(200);
+    });
+
+    // Sem isto, um logout feito ate 30 s depois de uma renovacao nao valeria:
+    // o token anterior ainda estaria na janela de graca.
+    it('logout encerra tambem o token rotacionado ainda na janela de graca', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      const rotated = await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(200);
+
+      await http()
+        .post('/auth/logout')
+        .set('Cookie', extractCookie(rotated, 'refreshToken'))
+        .expect(204);
+
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(401);
+    });
+
+    it('reuso de token rotacionado fora da janela derruba todas as sessoes', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      const rotated = await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(200);
+      const newCookie = extractCookie(rotated, 'refreshToken');
+
+      // Empurra a revogacao para fora da janela de graca.
+      await ctx.prisma.refreshToken.updateMany({
+        where: { userId: auth.id, revokedReason: 'ROTATED' },
+        data: { revokedAt: new Date(Date.now() - 10 * 60 * 1000) },
+      });
+
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(401);
+
+      // O token legitimo mais novo tambem caiu: nao da para saber quem e o
+      // dono e quem roubou.
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', newCookie)
+        .expect(401);
+    });
+  });
+
+  describe('reset de senha: uso unico e sessoes', () => {
+    it('o mesmo link nao funciona duas vezes', async () => {
+      const user = await createUser(ctx.prisma);
+      await http().post('/auth/forgot-password').send({ email: user.email });
+      const token = ctx.mailer.tokenFor(user.email);
+
+      await http()
+        .post('/auth/reset-password')
+        .send({ token, newPassword: 'An0ther!Passw0rd' })
+        .expect(204);
+
+      await http()
+        .post('/auth/reset-password')
+        .send({ token, newPassword: 'Th1rd!Passw0rd' })
+        .expect(401);
+
+      await http()
+        .post('/auth/login')
+        .send({ email: user.email, password: 'An0ther!Passw0rd' })
+        .expect(200);
+    });
+
+    it('derruba as sessoes abertas com a senha antiga', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+      await http().post('/auth/forgot-password').send({ email: auth.email });
+
+      await http()
+        .post('/auth/reset-password')
+        .send({
+          token: ctx.mailer.tokenFor(auth.email),
+          newPassword: 'An0ther!Passw0rd',
+        })
+        .expect(204);
+
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', auth.refreshCookie)
+        .expect(401);
+    });
   });
 });

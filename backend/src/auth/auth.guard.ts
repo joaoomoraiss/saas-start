@@ -48,6 +48,7 @@ export class AuthGuard implements CanActivate {
     }
 
     request.user = user;
+    request.sessionId = payload.sid;
     request.ability = this.abilityService.createForUser(user);
 
     return true;

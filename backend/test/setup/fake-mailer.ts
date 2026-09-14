@@ -1,12 +1,9 @@
-import { MailerService } from 'src/mailer/mailer.service';
+import { MailerService, MailMessage } from 'src/mailer/mailer.service';
 
-export interface SentMail {
-  to: string;
-  html: string;
-}
+export type SentMail = MailMessage;
 
 /**
- * Substitui o transporte SMTP, mantendo MailService e seus templates reais
+ * Substitui o transporte (Resend), mantendo MailService e seus templates reais
  * dentro do teste. Os fluxos de confirmacao e de reset dependem de um token
  * que so existe dentro do e-mail, entao a caixa de saida e o unico jeito
  * honesto de obte-lo — sem expor o token em uma resposta HTTP so para
@@ -15,8 +12,8 @@ export interface SentMail {
 export class FakeMailerService implements Pick<MailerService, 'sendMail'> {
   readonly outbox: SentMail[] = [];
 
-  sendMail(template: string, to: string): Promise<void> {
-    this.outbox.push({ to, html: template });
+  sendMail(message: MailMessage): Promise<void> {
+    this.outbox.push(message);
     return Promise.resolve();
   }
 
@@ -36,12 +33,12 @@ export class FakeMailerService implements Pick<MailerService, 'sendMail'> {
       throw new Error(`Nenhum e-mail enviado para ${to}`);
     }
 
-    const match = mail.html.match(/token=([^"&\s]+)/);
+    const match = mail.html.match(/token=([^"&\s<]+)/);
 
     if (!match) {
       throw new Error(`Nenhum token encontrado no e-mail para ${to}`);
     }
 
-    return match[1];
+    return decodeURIComponent(match[1]);
   }
 }

@@ -74,6 +74,18 @@ describe('PaymentsController', () => {
       expect(payments.cancelSubscription).toHaveBeenCalledWith('user-1');
     });
 
+    it('retomada usa o id do token', async () => {
+      await controller.resume(REQUEST);
+
+      expect(payments.resumeSubscription).toHaveBeenCalledWith('user-1');
+    });
+
+    it('reembolso usa o id do token', async () => {
+      await controller.refund(REQUEST);
+
+      expect(payments.refundLatestPayment).toHaveBeenCalledWith('user-1');
+    });
+
     it('minhas cobrancas usa o id do token — nunca um parametro (IDOR)', () => {
       void controller.findMine(REQUEST);
 

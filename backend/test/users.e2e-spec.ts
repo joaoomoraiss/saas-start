@@ -4,6 +4,7 @@ import { createTestApp, TestContext } from './setup/test-app';
 import {
   createAndLogin,
   createUser,
+  extractCookie,
   uniqueEmail,
   VALID_PASSWORD,
 } from './setup/fixtures';
@@ -431,6 +432,138 @@ describe('Users (e2e)', () => {
           newPassword: 'N0va!Senha123',
         })
         .expect(403);
+    });
+
+    it('derruba as outras sessoes e mantem a de quem trocou', async () => {
+      const atual = await createAndLogin(ctx.app, ctx.prisma);
+
+      // Segunda sessao do mesmo usuario (outro dispositivo).
+      const outro = await http()
+        .post('/auth/login')
+        .send({ email: atual.email, password: VALID_PASSWORD })
+        .expect(200);
+      const outroCookie = extractCookie(outro, 'refreshToken');
+
+      await http()
+        .patch('/user/password')
+        .set('Authorization', `Bearer ${atual.token}`)
+        .send({ currentPassword: VALID_PASSWORD, newPassword: 'N0va!Senha123' })
+        .expect(200);
+
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', atual.refreshCookie)
+        .expect(200);
+
+      await http()
+        .post('/auth/refresh-token')
+        .set('Cookie', outroCookie)
+        .expect(401);
+    });
+  });
+
+  describe('GET /user/me/export (LGPD)', () => {
+    it('exige token', async () => {
+      await http().get('/user/me/export').expect(401);
+    });
+
+    it('baixa os dados do titular do token como anexo', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+      await ctx.prisma.payment.create({
+        data: {
+          userId: auth.id,
+          plan: 'STANDARD',
+          amount: 4900,
+          currency: 'brl',
+          stripeInvoiceId: 'in_export',
+          stripeCustomerId: 'cus_segredo',
+          paidAt: new Date(),
+        },
+      });
+
+      const response = await http()
+        .get('/user/me/export')
+        .set('Authorization', `Bearer ${auth.token}`)
+        .expect(200);
+
+      expect(response.headers['content-disposition']).toContain('attachment');
+      expect(response.body.account.email).toBe(auth.email);
+      expect(response.body.payments).toHaveLength(1);
+      expect(response.body.sessions.length).toBeGreaterThan(0);
+
+      const json = JSON.stringify(response.body);
+      expect(json).not.toContain('password');
+      expect(json).not.toContain('cus_segredo');
+      expect(json).not.toContain('tokenHash');
+    });
+
+    // O direito de acesso nao depende de confirmar e-mail.
+    it('funciona com e-mail pendente de confirmacao', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma, {
+        isVerified: false,
+      });
+
+      await http()
+        .get('/user/me/export')
+        .set('Authorization', `Bearer ${auth.token}`)
+        .expect(200);
+    });
+  });
+
+  describe('DELETE /user/me (exclusao pelo titular)', () => {
+    it('exige token', async () => {
+      await http()
+        .delete('/user/me')
+        .send({ password: VALID_PASSWORD })
+        .expect(401);
+    });
+
+    it('recusa senha errada e mantem a conta', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      await http()
+        .delete('/user/me')
+        .set('Authorization', `Bearer ${auth.token}`)
+        .send({ password: 'Errada!123' })
+        .expect(401);
+
+      expect(
+        await ctx.prisma.user.findUnique({ where: { id: auth.id } }),
+      ).not.toBeNull();
+    });
+
+    it('apaga a conta e as sessoes, mas preserva as cobrancas sem vinculo', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+      const payment = await ctx.prisma.payment.create({
+        data: {
+          userId: auth.id,
+          plan: 'STANDARD',
+          amount: 4900,
+          currency: 'brl',
+          stripeInvoiceId: 'in_fiscal',
+          paidAt: new Date(),
+        },
+      });
+
+      await http()
+        .delete('/user/me')
+        .set('Authorization', `Bearer ${auth.token}`)
+        .send({ password: VALID_PASSWORD })
+        .expect(204);
+
+      expect(
+        await ctx.prisma.user.findUnique({ where: { id: auth.id } }),
+      ).toBeNull();
+      expect(
+        await ctx.prisma.refreshToken.count({ where: { userId: auth.id } }),
+      ).toBe(0);
+
+      // Obrigacao fiscal: a cobranca fica, sem apontar para ninguem.
+      const kept = await ctx.prisma.payment.findUnique({
+        where: { id: payment.id },
+      });
+      expect(kept).not.toBeNull();
+      expect(kept?.userId).toBeNull();
     });
   });
 });

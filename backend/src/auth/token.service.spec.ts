@@ -58,7 +58,7 @@ describe('TokenService', () => {
     });
 
     it('recusa o access token no proposito de reset de senha', async () => {
-      const { token } = await service.signAccessPair('user-1', 'USER');
+      const token = await service.signAccess('user-1', 'USER', 'sess-1');
 
       await expect(
         service.verify(TokenType.PasswordReset, token),
@@ -66,7 +66,7 @@ describe('TokenService', () => {
     });
 
     it('recusa o refresh token no proposito de acesso', async () => {
-      const { refreshToken } = await service.signAccessPair('user-1', 'USER');
+      const refreshToken = await service.signRefresh('user-1');
 
       await expect(
         service.verify(TokenType.Access, refreshToken),
@@ -78,7 +78,12 @@ describe('TokenService', () => {
       // claim, este token passaria como token de acesso.
       const forjado = await jwtService.signAsync(
         { id: 'user-1', typ: TokenType.EmailVerify },
-        { secret: CONFIG.JWT_SECRET, algorithm: 'HS256', expiresIn: '15m' },
+        {
+          secret: CONFIG.JWT_SECRET,
+          algorithm: 'HS256',
+          expiresIn: '15m',
+          jwtid: 'jti-1',
+        },
       );
 
       await expect(service.verify(TokenType.Access, forjado)).rejects.toThrow(
@@ -110,6 +115,17 @@ describe('TokenService', () => {
       );
     });
 
+    it('recusa token sem jti, mesmo com assinatura e typ corretos', async () => {
+      const token = await jwtService.signAsync(
+        { id: 'user-1', typ: TokenType.Access },
+        { secret: CONFIG.JWT_SECRET, algorithm: 'HS256', expiresIn: '15m' },
+      );
+
+      await expect(service.verify(TokenType.Access, token)).rejects.toThrow(
+        InvalidTokenException,
+      );
+    });
+
     it('recusa string que nao e um JWT', async () => {
       await expect(service.verify(TokenType.Access, 'lixo')).rejects.toThrow(
         InvalidTokenException,
@@ -121,7 +137,7 @@ describe('TokenService', () => {
         JSON.stringify({ alg: 'none', typ: 'JWT' }),
       ).toString('base64url');
       const body = Buffer.from(
-        JSON.stringify({ id: 'user-1', typ: TokenType.Access }),
+        JSON.stringify({ id: 'user-1', typ: TokenType.Access, jti: 'x' }),
       ).toString('base64url');
 
       await expect(
@@ -130,17 +146,28 @@ describe('TokenService', () => {
     });
   });
 
-  describe('signAccessPair', () => {
-    it('emite tokens diferentes entre si carregando id e papel', async () => {
-      const { token, refreshToken } = await service.signAccessPair(
-        'user-1',
-        'ADMIN',
-      );
-
-      expect(token).not.toBe(refreshToken);
+  describe('emissao', () => {
+    it('access token carrega id, papel e a sessao de origem', async () => {
+      const token = await service.signAccess('user-1', 'ADMIN', 'sess-1');
 
       const access = await service.verify(TokenType.Access, token);
-      expect(access).toMatchObject({ id: 'user-1', role: 'ADMIN' });
+      expect(access).toMatchObject({
+        id: 'user-1',
+        role: 'ADMIN',
+        sid: 'sess-1',
+      });
+      expect(access.jti).toEqual(expect.any(String));
+      expect(access.exp).toEqual(expect.any(Number));
+    });
+
+    // Sem jti, os dois sairiam identicos e o hash colidiria no banco.
+    it('dois refresh tokens emitidos no mesmo instante sao distintos', async () => {
+      const [a, b] = await Promise.all([
+        service.signRefresh('user-1'),
+        service.signRefresh('user-1'),
+      ]);
+
+      expect(a).not.toBe(b);
     });
   });
 

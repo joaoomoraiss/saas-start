@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { JwtModule } from '@nestjs/jwt';
 import { CaslModule } from 'src/casl/casl.module';
 import { AuthGuard } from './auth.guard';
+import { SessionService } from './session.service';
 import { TokenService } from './token.service';
 
 /**
@@ -18,7 +19,7 @@ import { TokenService } from './token.service';
     CaslModule,
     JwtModule.register({ signOptions: { algorithm: 'HS256' } }),
   ],
-  providers: [TokenService, AuthGuard],
-  exports: [TokenService, AuthGuard, JwtModule],
+  providers: [TokenService, SessionService, AuthGuard],
+  exports: [TokenService, SessionService, AuthGuard, JwtModule],
 })
 export class TokenModule {}

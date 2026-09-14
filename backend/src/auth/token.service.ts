@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { JwtService, JwtSignOptions } from '@nestjs/jwt';
+import { randomUUID } from 'node:crypto';
 import { Role } from 'generated/prisma/enums';
 import { InvalidTokenException } from './exceptions/token-not-found.exception';
 
@@ -15,7 +16,19 @@ export interface TokenPayload {
   id: string;
   role?: Role;
   typ: TokenType;
+  /**
+   * Sessao (linha de RefreshToken) que emitiu este access token. E o que
+   * permite, por exemplo, trocar a senha derrubando todas as OUTRAS sessoes
+   * sem deslogar quem fez a troca.
+   */
+  sid?: string;
+  /** Id unico do token: base do uso unico e do hash sem colisao. */
+  jti: string;
+  /** Expiracao em segundos (epoch). */
+  exp: number;
 }
+
+type SignablePayload = Pick<TokenPayload, 'id' | 'role' | 'sid'>;
 
 const SECRET_ENV: Record<TokenType, string> = {
   [TokenType.Access]: 'JWT_SECRET',
@@ -31,6 +44,9 @@ const SECRET_ENV: Record<TokenType, string> = {
  * verificacao. Sao duas barreiras de proposito: sem elas, um token emitido
  * para confirmar e-mail (que trafega em texto plano dentro de uma URL)
  * autentica na API como se fosse um token de acesso.
+ *
+ * Este servico so assina e confere assinatura. Se um refresh token ainda vale
+ * (revogado, rotacionado, reusado) quem decide e o SessionService, no banco.
  */
 @Injectable()
 export class TokenService {
@@ -66,13 +82,16 @@ export class TokenService {
     );
   }
 
-  private sign(type: TokenType, payload: Omit<TokenPayload, 'typ'>) {
+  private sign(type: TokenType, payload: SignablePayload) {
     return this.jwtService.signAsync(
       { ...payload, typ: type },
       {
         secret: this.secretFor(type),
         expiresIn: this.expiresInFor(type),
         algorithm: 'HS256',
+        // Sem jti, dois tokens do mesmo usuario emitidos no mesmo segundo
+        // saem identicos — e o hash do refresh token colidiria no banco.
+        jwtid: randomUUID(),
       },
     );
   }
@@ -94,20 +113,19 @@ export class TokenService {
       throw new InvalidTokenException();
     }
 
-    if (payload.typ !== type) {
+    if (payload.typ !== type || !payload.jti) {
       throw new InvalidTokenException();
     }
 
     return payload;
   }
 
-  async signAccessPair(id: string, role: Role) {
-    const [token, refreshToken] = await Promise.all([
-      this.sign(TokenType.Access, { id, role }),
-      this.sign(TokenType.Refresh, { id, role }),
-    ]);
+  signAccess(id: string, role: Role, sessionId: string) {
+    return this.sign(TokenType.Access, { id, role, sid: sessionId });
+  }
 
-    return { token, refreshToken };
+  signRefresh(id: string) {
+    return this.sign(TokenType.Refresh, { id });
   }
 
   signEmailVerification(id: string) {

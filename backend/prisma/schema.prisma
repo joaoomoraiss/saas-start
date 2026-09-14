@@ -52,19 +52,64 @@ model User {
   /// corromperia o roteamento dos webhooks (que so trazem IDs da Stripe).
   stripeCustomerId     String? @unique
   stripeSubscriptionId String? @unique
+  /// Ultima Checkout Session criada. Permite expirar a sessao anterior antes
+  /// de abrir outra: sem isso, duas abas de checkout viram duas assinaturas.
+  stripeCheckoutSessionId String?
 
-  payments Payment[]
+  payments      Payment[]
+  refreshTokens RefreshToken[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
 
-/// Historico de cobrancas: uma linha por fatura. Append-only, escrito
-/// exclusivamente pelo webhook da Stripe — nunca por acao do usuario.
-model Payment {
+/// Por que uma sessao deixou de valer. Separar os motivos e o que permite
+/// distinguir roubo de token (reuso de um token ROTATED) de um evento benigno
+/// (logout, troca de senha).
+enum RevokedReason {
+  ROTATED
+  LOGOUT
+  PASSWORD_CHANGE
+  REUSE
+}
+
+/// Uma linha por sessao (refresh token emitido). Guarda so o SHA-256 do
+/// token: um dump do banco nao entrega sessoes validas.
+model RefreshToken {
   id     String @id @default(uuid())
   userId String
   user   User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  tokenHash String @unique
+  expiresAt DateTime
+
+  revokedAt     DateTime?
+  revokedReason RevokedReason?
+
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([expiresAt])
+}
+
+/// Tokens de uso unico ja consumidos (hoje: reset de senha), pelo `jti`.
+/// A linha so precisa existir ate o JWT expirar; o job de limpeza apaga.
+model UsedToken {
+  jti       String   @id
+  expiresAt DateTime
+
+  @@index([expiresAt])
+}
+
+/// Historico de cobrancas: uma linha por fatura. Append-only, escrito
+/// exclusivamente pelo webhook da Stripe — nunca por acao do usuario.
+model Payment {
+  id     String  @id @default(uuid())
+  /// SET NULL, nao CASCADE: registro fiscal precisa sobreviver a exclusao da
+  /// conta (a LGPD, Art. 16, I, preserva essa obrigacao legal). Apagar a conta
+  /// desfaz o vinculo com a pessoa; a cobranca continua no historico.
+  userId String?
+  user   User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   /// Plano no MOMENTO da cobranca — congelado, nao segue mudancas futuras.
   plan     Plan

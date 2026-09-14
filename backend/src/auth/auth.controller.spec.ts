@@ -26,15 +26,16 @@ describe('AuthController', () => {
     controller = moduleRef.get(AuthController);
   });
 
-  it('register delega o DTO ao service', async () => {
+  it('register delega o DTO e o IP do cliente ao service', async () => {
     const dto = { email: 'a@b.com', password: 'Str0ng!Passw0rd' };
+    const req = { headers: {}, ip: '198.51.100.1' } as unknown as Request;
     authService.register.mockResolvedValue({ id: 'user-1', email: dto.email });
 
-    await expect(controller.register(dto)).resolves.toEqual({
+    await expect(controller.register(dto, req)).resolves.toEqual({
       id: 'user-1',
       email: dto.email,
     });
-    expect(authService.register).toHaveBeenCalledWith(dto);
+    expect(authService.register).toHaveBeenCalledWith(dto, '198.51.100.1');
   });
 
   it('login repassa a resposta para o service gravar o cookie', async () => {
@@ -87,10 +88,12 @@ describe('AuthController', () => {
     expect(authService.refreshToken).toHaveBeenCalledWith(req, res);
   });
 
-  it('logout repassa a resposta', () => {
-    controller.logout(res);
+  it('logout repassa request (cookie a revogar) e response', async () => {
+    const req = mock<Request>();
 
-    expect(authService.logout).toHaveBeenCalledWith(res);
+    await controller.logout(req, res);
+
+    expect(authService.logout).toHaveBeenCalledWith(req, res);
   });
 
   // O refresh token so pode viver no cookie httpOnly.

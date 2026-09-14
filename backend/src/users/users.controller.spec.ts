@@ -64,6 +64,48 @@ describe('UsersController', () => {
     });
   });
 
+  describe('rotas do proprio titular (id do token, nunca de parametro)', () => {
+    const request = { user: USER, sessionId: 'sess-1' } as any;
+
+    it('exportMyData usa o id do token', async () => {
+      await controller.exportMyData(request);
+
+      expect(usersService.exportData).toHaveBeenCalledWith('user-1');
+    });
+
+    it('deleteMyAccount usa o id do token e repassa a senha', async () => {
+      await controller.deleteMyAccount(request, { password: 'minha-senha' });
+
+      expect(usersService.deleteOwnAccount).toHaveBeenCalledWith(
+        'user-1',
+        'minha-senha',
+      );
+    });
+
+    it('changePassword preserva a sessao de quem pediu', async () => {
+      await controller.changePassword(request, {
+        currentPassword: 'atual',
+        newPassword: 'N0va!Senha123',
+      });
+
+      expect(usersService.changePassword).toHaveBeenCalledWith(
+        'user-1',
+        'atual',
+        'N0va!Senha123',
+        'sess-1',
+      );
+    });
+
+    it.each(['exportMyData', 'deleteMyAccount'] as const)(
+      '%s nao exige papel ADMIN',
+      (handler) => {
+        expect(
+          reflector.get('roles', UsersController.prototype[handler] as any),
+        ).toBeUndefined();
+      },
+    );
+  });
+
   /**
    * Autorizacao declarada por decorator e facil de remover sem querer numa
    * refatoracao, e a rota fica aberta em silencio. Estes testes leem os

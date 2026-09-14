@@ -19,4 +19,6 @@ export type AuthUser = Omit<User, 'password'>;
 export interface AuthenticatedRequest extends Request {
   user: AuthUser;
   ability: AppAbility;
+  /** Sessao que emitiu o access token (claim `sid`). */
+  sessionId?: string;
 }

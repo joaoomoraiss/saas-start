@@ -50,6 +50,53 @@ describe('Payments (e2e)', () => {
     it('DELETE /payments/:id exige token', async () => {
       await http().delete(`/payments/${ID}`).expect(401);
     });
+
+    it('POST /payments/resume exige token', async () => {
+      await http().post('/payments/resume').expect(401);
+    });
+
+    it('POST /payments/refund exige token', async () => {
+      await http().post('/payments/refund').expect(401);
+    });
+  });
+
+  describe('acoes sobre a assinatura sem assinatura', () => {
+    it('cancelar sem assinatura responde 400', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      await http()
+        .post('/payments/cancel')
+        .set('Authorization', `Bearer ${auth.token}`)
+        .expect(400);
+    });
+
+    it('retomar sem cancelamento agendado responde 400', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+
+      await http()
+        .post('/payments/resume')
+        .set('Authorization', `Bearer ${auth.token}`)
+        .expect(400);
+    });
+
+    it('reembolso sem cobranca na janela de 7 dias responde 400', async () => {
+      const auth = await createAndLogin(ctx.app, ctx.prisma);
+      await ctx.prisma.payment.create({
+        data: {
+          userId: auth.id,
+          plan: 'STANDARD',
+          amount: 4900,
+          currency: 'brl',
+          stripeInvoiceId: 'in_antiga',
+          paidAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        },
+      });
+
+      await http()
+        .post('/payments/refund')
+        .set('Authorization', `Bearer ${auth.token}`)
+        .expect(400);
+    });
   });
 
   describe('rotas de admin', () => {

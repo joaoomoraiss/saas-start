@@ -31,6 +31,9 @@ describe('AuthGuard', () => {
     tokenService.verify.mockResolvedValue({
       id: USER.id,
       typ: TokenType.Access,
+      sid: 'sess-1',
+      jti: 'jti-1',
+      exp: 0,
     });
     prisma.user.findUnique.mockResolvedValue(USER as any);
     delete process.env.REQUIRE_EMAIL_VERIFICATION;
@@ -89,12 +92,22 @@ describe('AuthGuard', () => {
     expect(request.ability.can('read', 'User')).toBeDefined();
   });
 
+  it('anexa a sessao de origem do token (claim sid)', async () => {
+    const request = withBearer('abc') as Record<string, any>;
+
+    await guard.canActivate(contextFor(request));
+
+    expect(request.sessionId).toBe('sess-1');
+  });
+
   // O papel vem do banco, nao do token: revogar um ADMIN tem efeito imediato.
   it('usa o papel do banco, ignorando o que vem no token', async () => {
     tokenService.verify.mockResolvedValue({
       id: USER.id,
       role: 'ADMIN',
       typ: TokenType.Access,
+      jti: 'jti-1',
+      exp: 0,
     });
     const request = withBearer('abc') as Record<string, any>;
 

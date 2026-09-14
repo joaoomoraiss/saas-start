@@ -1,12 +1,16 @@
+import { BadRequestException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import bcrypt from 'bcrypt';
-import { Response } from 'express';
-import { mock, MockProxy } from 'jest-mock-extended';
+import { Request, Response } from 'express';
+import { DeepMockProxy, mock, mockDeep, MockProxy } from 'jest-mock-extended';
+import { CaptchaService } from 'src/captcha/captcha.service';
 import { MailService } from 'src/mail/mail.service';
+import { PrismaService } from 'src/prisma/prisma.service';
 import { UsersService } from 'src/users/users.service';
 import { AuthService } from './auth.service';
 import { InvalidTokenException } from './exceptions/token-not-found.exception';
 import { UserNotFoundException } from './exceptions/user-not-found.exception';
+import { SessionService } from './session.service';
 import { TokenService, TokenType } from './token.service';
 
 const PASSWORD = 'Str0ng!Passw0rd';
@@ -16,11 +20,21 @@ const CONFIG: Record<string, string> = {
   REQUIRE_EMAIL_VERIFICATION: 'false',
 };
 
+const payload = (typ: TokenType, id = 'user-1') => ({
+  id,
+  typ,
+  jti: 'jti-1',
+  exp: 1_700_000_000,
+});
+
 describe('AuthService', () => {
   let service: AuthService;
   let usersService: MockProxy<UsersService>;
   let tokenService: MockProxy<TokenService>;
+  let sessionService: MockProxy<SessionService>;
   let mailService: MockProxy<MailService>;
+  let captchaService: MockProxy<CaptchaService>;
+  let prisma: DeepMockProxy<PrismaService>;
   let res: MockProxy<Response>;
   let user: {
     id: string;
@@ -33,7 +47,10 @@ describe('AuthService', () => {
   beforeEach(async () => {
     usersService = mock<UsersService>();
     tokenService = mock<TokenService>();
+    sessionService = mock<SessionService>();
     mailService = mock<MailService>();
+    captchaService = mock<CaptchaService>();
+    prisma = mockDeep<PrismaService>();
     res = mock<Response>();
 
     user = {
@@ -45,18 +62,22 @@ describe('AuthService', () => {
     };
 
     tokenService.refreshTtlDays.mockReturnValue(30);
-    tokenService.signAccessPair.mockResolvedValue({
+    tokenService.signEmailVerification.mockResolvedValue('verify-token');
+    tokenService.signPasswordReset.mockResolvedValue('reset-token');
+    sessionService.create.mockResolvedValue({
       token: 'access-token',
       refreshToken: 'refresh-token',
     });
-    tokenService.signEmailVerification.mockResolvedValue('verify-token');
-    tokenService.signPasswordReset.mockResolvedValue('reset-token');
+    captchaService.verify.mockResolvedValue(true);
 
     service = new AuthService(
       usersService,
       tokenService,
+      sessionService,
       { get: (key: string) => CONFIG[key] } as unknown as ConfigService,
       mailService,
+      captchaService,
+      prisma,
     );
   });
 
@@ -80,6 +101,45 @@ describe('AuthService', () => {
       expect(result).toEqual({ id: user.id, email: user.email });
     });
 
+    it('confere o captcha com o token, o IP do cliente e a action de cadastro', async () => {
+      usersService.create.mockResolvedValue(user as any);
+
+      await service.register(
+        { email: user.email, password: PASSWORD, captchaToken: 'cf-token' },
+        '203.0.113.7',
+      );
+
+      expect(captchaService.verify).toHaveBeenCalledWith(
+        'cf-token',
+        '203.0.113.7',
+        'register',
+      );
+    });
+
+    it('nao repassa o token do captcha para a criacao do usuario', async () => {
+      usersService.create.mockResolvedValue(user as any);
+
+      await service.register({
+        email: user.email,
+        password: PASSWORD,
+        captchaToken: 'cf-token',
+      });
+
+      expect(usersService.create.mock.calls[0][0]).not.toHaveProperty(
+        'captchaToken',
+      );
+    });
+
+    it('recusa com 400 e nao cria nada quando o captcha falha', async () => {
+      captchaService.verify.mockResolvedValue(false);
+
+      await expect(
+        service.register({ email: user.email, password: PASSWORD }),
+      ).rejects.toThrow(BadRequestException);
+      expect(usersService.create).not.toHaveBeenCalled();
+      expect(mailService.sendUserConfirmation).not.toHaveBeenCalled();
+    });
+
     it('nao devolve o hash da senha', async () => {
       usersService.create.mockResolvedValue(user as any);
 
@@ -93,7 +153,7 @@ describe('AuthService', () => {
   });
 
   describe('login', () => {
-    it('devolve o access token e grava o refresh no cookie', async () => {
+    it('abre uma sessao persistida e grava o refresh no cookie', async () => {
       usersService.findByEmailForAuth.mockResolvedValue(user as any);
 
       const result = await service.login(
@@ -101,6 +161,7 @@ describe('AuthService', () => {
         res,
       );
 
+      expect(sessionService.create).toHaveBeenCalledWith(user);
       expect(result).toEqual({ token: 'access-token' });
       expect(res.cookie).toHaveBeenCalledWith(
         'refreshToken',
@@ -139,14 +200,14 @@ describe('AuthService', () => {
       ).rejects.toMatchObject({ status: 401, message: 'Invalid credentials' });
     });
 
-    it('nao emite token quando as credenciais falham', async () => {
+    it('nao abre sessao quando as credenciais falham', async () => {
       usersService.findByEmailForAuth.mockResolvedValue(null);
 
       await service
         .login({ email: 'ninguem@example.com', password: PASSWORD }, res)
         .catch(() => undefined);
 
-      expect(tokenService.signAccessPair).not.toHaveBeenCalled();
+      expect(sessionService.create).not.toHaveBeenCalled();
       expect(res.cookie).not.toHaveBeenCalled();
     });
 
@@ -167,10 +228,7 @@ describe('AuthService', () => {
 
   describe('confirmEmail', () => {
     it('marca como verificado apos validar o token de confirmacao', async () => {
-      tokenService.verify.mockResolvedValue({
-        id: user.id,
-        typ: TokenType.EmailVerify,
-      });
+      tokenService.verify.mockResolvedValue(payload(TokenType.EmailVerify));
       usersService.findOne.mockResolvedValue(user as any);
 
       await service.confirmEmail('verify-token');
@@ -192,10 +250,9 @@ describe('AuthService', () => {
     });
 
     it('falha quando o usuario do token nao existe mais', async () => {
-      tokenService.verify.mockResolvedValue({
-        id: 'sumiu',
-        typ: TokenType.EmailVerify,
-      });
+      tokenService.verify.mockResolvedValue(
+        payload(TokenType.EmailVerify, 'sumiu'),
+      );
       usersService.findOne.mockRejectedValue(new Error('not found'));
 
       await expect(service.confirmEmail('verify-token')).rejects.toThrow(
@@ -258,96 +315,126 @@ describe('AuthService', () => {
   });
 
   describe('resetPassword', () => {
-    it('grava a nova senha apos validar o token de reset', async () => {
-      tokenService.verify.mockResolvedValue({
-        id: user.id,
-        typ: TokenType.PasswordReset,
-      });
+    beforeEach(() => {
+      tokenService.verify.mockResolvedValue(payload(TokenType.PasswordReset));
       usersService.findOne.mockResolvedValue(user as any);
+      usersService.hashPassword.mockResolvedValue('novo-hash');
+      prisma.$transaction.mockResolvedValue([] as any);
+    });
 
+    it('consome o jti e grava a senha na mesma transacao', async () => {
       await service.resetPassword('reset-token', 'N3w!Passw0rd');
 
       expect(tokenService.verify).toHaveBeenCalledWith(
         TokenType.PasswordReset,
         'reset-token',
       );
-      expect(usersService.setPassword).toHaveBeenCalledWith(
+      expect(prisma.usedToken.create).toHaveBeenCalledWith({
+        data: { jti: 'jti-1', expiresAt: new Date(1_700_000_000 * 1000) },
+      });
+      expect(prisma.user.update).toHaveBeenCalledWith({
+        where: { id: user.id },
+        data: { password: 'novo-hash' },
+      });
+      expect(prisma.$transaction).toHaveBeenCalledTimes(1);
+    });
+
+    it('derruba todas as sessoes do usuario', async () => {
+      await service.resetPassword('reset-token', 'N3w!Passw0rd');
+
+      expect(sessionService.revokeAllForUser).toHaveBeenCalledWith(
         user.id,
-        'N3w!Passw0rd',
+        'PASSWORD_CHANGE',
       );
     });
 
-    it('nao altera a senha quando o token e invalido', async () => {
+    it('recusa link ja usado (jti duplicado) sem derrubar sessoes', async () => {
+      prisma.$transaction.mockRejectedValue({ code: 'P2002' });
+
+      await expect(
+        service.resetPassword('reset-token', 'N3w!Passw0rd'),
+      ).rejects.toThrow(InvalidTokenException);
+      expect(sessionService.revokeAllForUser).not.toHaveBeenCalled();
+    });
+
+    it('propaga falhas de banco que nao sao duplicidade', async () => {
+      prisma.$transaction.mockRejectedValue(new Error('conexao caiu'));
+
+      await expect(
+        service.resetPassword('reset-token', 'N3w!Passw0rd'),
+      ).rejects.toThrow('conexao caiu');
+    });
+
+    it('nao altera nada quando o token e invalido', async () => {
       tokenService.verify.mockRejectedValue(new InvalidTokenException());
 
       await expect(
         service.resetPassword('lixo', 'N3w!Passw0rd'),
       ).rejects.toThrow(InvalidTokenException);
-      expect(usersService.setPassword).not.toHaveBeenCalled();
+      expect(prisma.$transaction).not.toHaveBeenCalled();
     });
   });
 
   describe('refreshToken', () => {
     const requestWith = (cookies: Record<string, string> | undefined) =>
-      ({ cookies }) as any;
+      ({ cookies }) as unknown as Request;
 
-    it('emite novo par a partir do cookie valido', async () => {
-      tokenService.verify.mockResolvedValue({
-        id: user.id,
-        typ: TokenType.Refresh,
+    it('rotaciona a sessao e grava o novo refresh no cookie', async () => {
+      sessionService.rotate.mockResolvedValue({
+        token: 'novo-access',
+        refreshToken: 'novo-refresh',
       });
-      usersService.findOne.mockResolvedValue(user as any);
 
       const result = await service.refreshToken(
         requestWith({ refreshToken: 'refresh-token' }),
         res,
       );
 
-      expect(result).toEqual({ token: 'access-token' });
-      expect(res.cookie).toHaveBeenCalled();
+      expect(sessionService.rotate).toHaveBeenCalledWith('refresh-token');
+      expect(result).toEqual({ token: 'novo-access' });
+      expect(res.cookie).toHaveBeenCalledWith(
+        'refreshToken',
+        'novo-refresh',
+        expect.objectContaining({ httpOnly: true }),
+      );
     });
 
     it('rejeita requisicao sem cookie', async () => {
       await expect(
         service.refreshToken(requestWith(undefined), res),
       ).rejects.toThrow(InvalidTokenException);
+      expect(sessionService.rotate).not.toHaveBeenCalled();
     });
 
-    it('rejeita cookie que nao e refresh token', async () => {
-      tokenService.verify.mockRejectedValue(new InvalidTokenException());
+    it('propaga a recusa da sessao sem gravar cookie', async () => {
+      sessionService.rotate.mockRejectedValue(new InvalidTokenException());
 
       await expect(
-        service.refreshToken(
-          requestWith({ refreshToken: 'access-token' }),
-          res,
-        ),
+        service.refreshToken(requestWith({ refreshToken: 'velho' }), res),
       ).rejects.toThrow(InvalidTokenException);
-    });
-
-    it('rejeita refresh de usuario removido', async () => {
-      tokenService.verify.mockResolvedValue({
-        id: user.id,
-        typ: TokenType.Refresh,
-      });
-      usersService.findOne.mockRejectedValue(new Error('not found'));
-
-      await expect(
-        service.refreshToken(
-          requestWith({ refreshToken: 'refresh-token' }),
-          res,
-        ),
-      ).rejects.toThrow(InvalidTokenException);
+      expect(res.cookie).not.toHaveBeenCalled();
     });
   });
 
   describe('logout', () => {
-    it('limpa o cookie de refresh', () => {
-      service.logout(res);
+    it('revoga a sessao no banco e limpa o cookie', async () => {
+      await service.logout(
+        { cookies: { refreshToken: 'refresh-token' } } as unknown as Request,
+        res,
+      );
 
+      expect(sessionService.revoke).toHaveBeenCalledWith('refresh-token');
       expect(res.clearCookie).toHaveBeenCalledWith(
         'refreshToken',
         expect.objectContaining({ httpOnly: true, path: '/' }),
       );
+    });
+
+    it('sem cookie so limpa, sem erro', async () => {
+      await service.logout({ cookies: {} } as unknown as Request, res);
+
+      expect(sessionService.revoke).not.toHaveBeenCalled();
+      expect(res.clearCookie).toHaveBeenCalled();
     });
   });
 });

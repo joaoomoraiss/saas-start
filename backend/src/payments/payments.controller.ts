@@ -13,9 +13,11 @@ import {
   UseGuards,
 } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
+import { SkipThrottle, Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
 import { AuthGuard } from 'src/auth/auth.guard';
 import { VerifiedEmailGuard } from 'src/auth/verified-email.guard';
+import { LIMITS } from 'src/common/throttle/limits';
 import type { AuthenticatedRequest } from 'src/common/types/authenticated-request';
 import { RequiredRoles } from 'src/role/role.decorator';
 import { RoleGuard } from 'src/role/role.guard';
@@ -41,8 +43,12 @@ export class PaymentsController {
    * Publico: a Stripe nao tem nosso token. A autenticacao e a assinatura
    * criptografica do payload, verificada antes de qualquer processamento.
    *
+   * Fora do rate limit: todas as entregas vem dos IPs da Stripe, e um 429
+   * aqui atrasaria a liberacao de planos pagos.
+   *
    * Declarado ANTES das rotas com :id para nao ser capturado por elas.
    */
+  @SkipThrottle()
   @Post('webhook')
   @HttpCode(200)
   async webhook(
@@ -69,6 +75,7 @@ export class PaymentsController {
     return { received: true };
   }
 
+  @Throttle(LIMITS.checkout)
   @UseGuards(AuthGuard, VerifiedEmailGuard)
   @Post('checkout')
   @HttpCode(200)
@@ -79,11 +86,33 @@ export class PaymentsController {
     return this.paymentsService.createCheckout(request.user.id, dto.plan);
   }
 
+  /** Agenda o fim da assinatura para o fim do periodo ja pago. */
+  @Throttle(LIMITS.subscription)
   @UseGuards(AuthGuard, VerifiedEmailGuard)
   @Post('cancel')
   @HttpCode(200)
   cancel(@Req() request: AuthenticatedRequest) {
     return this.paymentsService.cancelSubscription(request.user.id);
+  }
+
+  @Throttle(LIMITS.subscription)
+  @UseGuards(AuthGuard, VerifiedEmailGuard)
+  @Post('resume')
+  @HttpCode(200)
+  resume(@Req() request: AuthenticatedRequest) {
+    return this.paymentsService.resumeSubscription(request.user.id);
+  }
+
+  /**
+   * Direito de arrependimento (CDC Art. 49): reembolsa a ultima cobranca, se
+   * feita ha ate 7 dias, e encerra o plano na hora.
+   */
+  @Throttle(LIMITS.refund)
+  @UseGuards(AuthGuard, VerifiedEmailGuard)
+  @Post('refund')
+  @HttpCode(200)
+  refund(@Req() request: AuthenticatedRequest) {
+    return this.paymentsService.refundLatestPayment(request.user.id);
   }
 
   /**

@@ -3,6 +3,9 @@ import {
   Controller,
   Delete,
   Get,
+  Header,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -10,16 +13,19 @@ import {
   Req,
   UseGuards,
 } from '@nestjs/common';
+import { Throttle } from '@nestjs/throttler';
 import { AuthGuard } from 'src/auth/auth.guard';
 import { VerifiedEmailGuard } from 'src/auth/verified-email.guard';
 import { userSubject } from 'src/casl/cast-ability/cast-ability.service';
 import { CheckPolicies } from 'src/casl/policies.decorator';
 import { PoliciesGuard } from 'src/casl/policies.guard';
+import { LIMITS } from 'src/common/throttle/limits';
 import type { AuthenticatedRequest } from 'src/common/types/authenticated-request';
 import { RequiredRoles } from 'src/role/role.decorator';
 import { RoleGuard } from 'src/role/role.guard';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { CreateUserDto } from './dto/create-user.dto';
+import { DeleteAccountDto } from './dto/delete-account.dto';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateUserDto } from './dto/update-user.dto';
 import { UsersService } from './users.service';
@@ -32,7 +38,7 @@ import { UsersService } from './users.service';
  * Ownership e decidido pelas regras CASL em CastAbilityService, nao por
  * comparacoes de id espalhadas pelos handlers.
  *
- * As rotas /profile e /password vem ANTES de :id: o Nest casa na ordem de
+ * As rotas /profile, /password e /me vem ANTES de :id: o Nest casa na ordem de
  * declaracao, e depois de :id um GET /user/profile cairia no ParseUUIDPipe.
  */
 @UseGuards(AuthGuard, RoleGuard, PoliciesGuard)
@@ -59,6 +65,7 @@ export class UsersController {
     return this.usersService.updateProfile(request.user.id, dto);
   }
 
+  @Throttle(LIMITS.changePassword)
   @UseGuards(VerifiedEmailGuard)
   @Patch('password')
   changePassword(
@@ -69,7 +76,30 @@ export class UsersController {
       request.user.id,
       dto.currentPassword,
       dto.newPassword,
+      request.sessionId,
     );
+  }
+
+  /**
+   * Portabilidade (LGPD Art. 18). Sem VerifiedEmailGuard de proposito: o
+   * direito de acesso aos proprios dados nao depende de confirmar e-mail.
+   */
+  @Throttle(LIMITS.exportData)
+  @Get('me/export')
+  @Header('Content-Disposition', 'attachment; filename="meus-dados.json"')
+  exportMyData(@Req() request: AuthenticatedRequest) {
+    return this.usersService.exportData(request.user.id);
+  }
+
+  /** Exclusao pelo proprio titular. Cancela a assinatura antes de apagar. */
+  @Throttle(LIMITS.deleteAccount)
+  @Delete('me')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  async deleteMyAccount(
+    @Req() request: AuthenticatedRequest,
+    @Body() dto: DeleteAccountDto,
+  ) {
+    await this.usersService.deleteOwnAccount(request.user.id, dto.password);
   }
 
   @RequiredRoles('ADMIN')

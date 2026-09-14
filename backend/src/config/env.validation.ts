@@ -6,6 +6,7 @@ const REQUIRED = [
   'JWT_REFRESH_SECRET',
   'JWT_VERIFY_SECRET',
   'JWT_FORGOT_SECRET',
+  'SERVICE_TOKEN',
   'FRONTEND_URL',
 ] as const;
 
@@ -14,6 +15,7 @@ const SECRETS = [
   'JWT_REFRESH_SECRET',
   'JWT_VERIFY_SECRET',
   'JWT_FORGOT_SECRET',
+  'SERVICE_TOKEN',
 ] as const;
 
 const MIN_SECRET_LENGTH = 32;
@@ -32,6 +34,57 @@ const STRIPE_GROUP = [
   'STRIPE_WEBHOOK_SECRET',
   ...PRICE_ENV_KEYS,
 ] as const;
+
+/**
+ * Grupo do Resend: tudo-ou-nada pelo mesmo motivo. Chave sem remetente
+ * falha no primeiro envio; remetente sem chave nao envia nada.
+ */
+const MAIL_GROUP = ['RESEND_API_KEY', 'MAIL_FROM'] as const;
+
+function checkGroup(
+  config: Record<string, unknown>,
+  group: readonly string[],
+  label: string,
+  errors: string[],
+) {
+  const present = group.filter((key) => config[key]);
+
+  if (present.length && present.length < group.length) {
+    const missing = group.filter((key) => !config[key]);
+    errors.push(
+      `configuracao ${label} incompleta: falta ${missing.join(', ')}. ` +
+        `Defina todas as variaveis do grupo ou nenhuma.`,
+    );
+  }
+}
+
+/**
+ * A Stripe separa teste e producao pelo prefixo da chave, e nao avisa quando
+ * os dois se misturam — os dois modos funcionam, sobre dados diferentes:
+ * - chave de teste em producao: o checkout abre e ninguem e cobrado;
+ * - chave live fora de producao: um teste local cobra o cartao de alguem.
+ */
+function checkStripeKeyEnvironment(
+  config: Record<string, unknown>,
+  errors: string[],
+) {
+  const key = config.STRIPE_SECRET_KEY;
+  if (typeof key !== 'string' || !key) return;
+
+  const production = config.NODE_ENV === 'production';
+
+  if (production && /^(sk|rk)_test_/.test(key)) {
+    errors.push(
+      'STRIPE_SECRET_KEY e uma chave de TESTE com NODE_ENV=production: o checkout abriria e nunca cobraria ninguem',
+    );
+  }
+
+  if (!production && /^(sk|rk)_live_/.test(key)) {
+    errors.push(
+      'STRIPE_SECRET_KEY e uma chave LIVE fora de producao: um teste local cobraria um cartao de verdade',
+    );
+  }
+}
 
 /**
  * Validacao de ambiente executada no boot, antes de qualquer requisicao.
@@ -78,18 +131,9 @@ export function validateEnv(config: Record<string, unknown>) {
     }
   }
 
-  const stripeConfigured = STRIPE_GROUP.filter((key) => config[key]);
-
-  if (
-    stripeConfigured.length &&
-    stripeConfigured.length < STRIPE_GROUP.length
-  ) {
-    const missing = STRIPE_GROUP.filter((key) => !config[key]);
-    errors.push(
-      `configuracao da Stripe incompleta: falta ${missing.join(', ')}. ` +
-        `Defina todas as variaveis do grupo ou nenhuma (pagamentos desligados).`,
-    );
-  }
+  checkGroup(config, STRIPE_GROUP, 'da Stripe', errors);
+  checkStripeKeyEnvironment(config, errors);
+  checkGroup(config, MAIL_GROUP, 'do Resend', errors);
 
   if (errors.length) {
     throw new Error(
