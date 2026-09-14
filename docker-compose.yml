@@ -1,0 +1,78 @@
+# Stack completa: Postgres + migrations + API + web.
+#
+#   1. Preencha backend/.env e frontend/.env.local (ver README).
+#   2. docker compose up --build
+#   3. Front em http://localhost:3000, API em http://localhost:8080
+#
+# Para desenvolver com hot reload, use so o banco (backend/docker-compose.yaml)
+# e rode `npm run start:dev` / `npm run dev`. Os dois compose publicam a porta
+# 5432: suba um de cada vez.
+#
+# Variaveis NEXT_PUBLIC_* sao embutidas no build do front. O compose le do
+# ambiente do shell ou de um arquivo .env na RAIZ (nao do frontend/.env.local).
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: root
+      POSTGRES_PASSWORD: root
+      POSTGRES_DB: mydb
+    ports:
+      - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U root -d mydb"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Aplica as migrations e sai. A API so sobe depois que isto termina bem.
+  migrate:
+    build:
+      context: ./backend
+      target: migrate
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://root:root@db:5432/mydb?schema=public
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: "no"
+
+  backend:
+    build:
+      context: ./backend
+      target: runtime
+    env_file: ./backend/.env
+    environment:
+      DATABASE_URL: postgresql://root:root@db:5432/mydb?schema=public
+      PORT: "8080"
+    ports:
+      - "8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_DOMAIN_URL: ${NEXT_PUBLIC_DOMAIN_URL:-http://localhost:3000}
+        NEXT_PUBLIC_TURNSTILE_SITE_KEY: ${NEXT_PUBLIC_TURNSTILE_SITE_KEY:-}
+        NEXT_PUBLIC_GA_ID: ${NEXT_PUBLIC_GA_ID:-}
+    env_file: ./frontend/.env.local
+    environment:
+      # Dentro da rede do compose a API responde pelo nome do servico.
+      BACKEND_URL: http://backend:8080
+    ports:
+      - "3000:3000"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  db_data:

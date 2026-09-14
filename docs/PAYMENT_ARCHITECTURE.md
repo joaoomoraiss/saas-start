@@ -213,14 +213,21 @@ Passos:
 Fonte do usuário: `session.metadata.userId`.
 
 ```
-se falta userId ou plan em metadata → 400
-atualiza User:
-   stripeCustomerId     = session.customer
-   stripeSubscriptionId = session.subscription
-   subscriptionStatus   = "active"
-   plan                 = metadata.plan
-   credits              += PLAN_CONFIG[plan].beneficio   (se aplicável)
+se falta userId, plan ou subscription → loga e retorna 200
+   (um 4xx faria a Stripe reentregar para sempre algo que nunca vai dar certo)
+
+updateMany User WHERE id = metadata.userId
+                  AND stripeSubscriptionId IS DISTINCT FROM session.subscription:
+   stripeCustomerId        = session.customer
+   stripeSubscriptionId    = session.subscription
+   stripeCheckoutSessionId = null
+   subscriptionStatus      = "active"
+   plan                    = metadata.plan
+   credits                 += PLAN_CONFIG[plan].beneficio   (se aplicável)
 ```
+
+> **Idempotência:** o filtro pela assinatura faz a reentrega do mesmo evento não casar com
+> nenhuma linha. Sem ele, cada reentrega somaria os créditos de novo.
 
 #### `invoice.payment_succeeded` — cobrança paga (1ª e renovações)
 
@@ -228,7 +235,12 @@ Fonte do usuário: busca por `stripeCustomerId` (o evento não tem `metadata`).
 
 ```
 usuário = busca por stripeCustomerId == invoice.customer
-se não achou → return silencioso (evento de outro ambiente/cliente órfão)
+se não achou → consulta a assinatura da fatura na Stripe e usa subscription.metadata.userId
+   (a Stripe NÃO garante ordem: a 1ª fatura pode chegar antes do checkout.session.completed,
+    quando stripeCustomerId ainda nem foi gravado. Por isso o checkout grava a metadata
+    também em subscription_data.metadata.)
+   falha de rede nessa consulta → 503, para a Stripe reentregar
+se ainda não achou → return silencioso (evento de outro ambiente/cliente órfão)
 
 plano = resolve pelo price id da fatura (invoice.lines[0].price.id → PLAN_CONFIG)
         fallback: plano atual do usuário
@@ -259,7 +271,9 @@ compare com o Price ID da fatura. Isso é necessário porque a renovação não 
 #### `invoice.payment_failed` — cobrança recusada
 
 ```
-atualiza todos os User com stripeCustomerId == invoice.customer:
+fatura sem assinatura → ignora
+atualiza os User com stripeCustomerId == invoice.customer
+                 E stripeSubscriptionId == assinatura da fatura:
    subscriptionStatus = "past_due"
 ```
 
@@ -267,34 +281,109 @@ Não rebaixe o plano imediatamente — a Stripe tem retentativas automáticas co
 `past_due` é um estado de aviso; a perda de acesso vem depois, via
 `customer.subscription.deleted`.
 
+Filtrar pela assinatura impede que uma falha atrasada de uma assinatura antiga marque
+`past_due` quem já assinou de novo — ou volte um `canceled` para `past_due`.
+
+#### `customer.subscription.updated` — mudança feita fora do app
+
+```
+cancel_at_period_end ou cancel_at   → subscriptionStatus = "canceling"
+status == active                    → subscriptionStatus = "active"
+status == past_due | unpaid         → subscriptionStatus = "past_due"
+outros (incomplete, trialing...)    → ignora
+aplicado nos User com stripeSubscriptionId == subscription.id
+```
+
+Mantém o status em sincronia quando o cancelamento agendado é desfeito (ou feito) pelo
+painel da Stripe. Não mexe em `plan`.
+
 #### `customer.subscription.deleted` — assinatura encerrada
 
 ```
-atualiza todos os User com stripeCustomerId == subscription.customer:
+atualiza os User com stripeCustomerId == subscription.customer
+                 E stripeSubscriptionId == subscription.id:
    subscriptionStatus   = "canceled"
    stripeSubscriptionId = null
    plan                 = FREE
 ```
 
-Este é o único evento que efetivamente rebaixa o plano. Cobre cancelamento pelo usuário,
-falha definitiva de cobrança e cancelamento pelo admin no painel da Stripe.
+Este é o único evento que efetivamente rebaixa o plano. Cobre o fim do período após o
+cancelamento, falha definitiva de cobrança e cancelamento pelo painel da Stripe.
+
+Casar pelo id da assinatura, e não só pelo cliente, impede que um evento atrasado de uma
+assinatura antiga rebaixe quem já assinou de novo.
 
 > Note que os handlers de fatura/assinatura usam `updateMany` (update por filtro) em vez de
 > update por PK: a busca é por `stripeCustomerId`, e o `updateMany` não estoura exceção quando
 > não há match — comportamento desejado para eventos órfãos.
 
-### 5.4 Cancelamento pelo usuário
+### 5.4 Cancelamento pelo usuário (no fim do período)
 
 ```
 POST /payments/cancel  (autenticado)
-  → sem stripeSubscriptionId → 400 "sem assinatura ativa"
-  → chama Stripe: subscriptions.cancel(id)
-  → atualiza User: subscriptionStatus="canceled", stripeSubscriptionId=null, plan=FREE
+  → sem stripeSubscriptionId          → 400 "sem assinatura ativa"
+  → subscriptionStatus == "canceling" → 400 "já agendado"
+  → chama Stripe: subscriptions.update(id, { cancel_at_period_end: true })
+  → atualiza User: subscriptionStatus = "canceling"   (plano pago continua)
 ```
 
-O update local é feito imediatamente para dar feedback síncrono; o webhook
-`customer.subscription.deleted` chega em seguida e aplica o mesmo estado — por isso os dois
-caminhos precisam ser convergentes (mesmo resultado final), o que os torna idempotentes entre si.
+**Não cancele na hora.** O cliente pagou o mês inteiro; tirar o acesso no clique fica com o
+dinheiro de um serviço que deixou de ser prestado (CDC Art. 51, IV). O rebaixamento para `FREE`
+acontece quando a Stripe dispara `customer.subscription.deleted`, no fim do ciclo.
+
+`stripeSubscriptionId` continua gravado: é por ele que o webhook acha o usuário, e é o que
+permite retomar.
+
+```
+POST /payments/resume  (autenticado)
+  → status != "canceling" → 400
+  → subscriptions.update(id, { cancel_at_period_end: false })
+  → subscriptionStatus = "active"
+```
+
+### 5.5 Cancelamento imediato e reembolso
+
+**Cancelamento imediato** (`subscriptions.cancel`) só em dois casos, em que manter o período
+pago não faz sentido: exclusão de conta (não sobra conta para usar) e reembolso (o dinheiro
+volta, o acesso vai junto). Estado final: `canceled`, `stripeSubscriptionId = null`, `FREE`.
+
+Na **exclusão de conta**, cancele na Stripe **antes** de apagar o usuário: a linha do usuário
+guarda a única referência à assinatura. Apagando primeiro, uma falha no cancelamento deixa a
+pessoa sendo cobrada por uma conta que não existe mais. O `Payment` sobrevive sem vínculo
+(FK `ON DELETE SET NULL`), por obrigação fiscal.
+
+**Reembolso** (direito de arrependimento, CDC Art. 49):
+
+```
+POST /payments/refund  (autenticado)
+  → última Payment PAID do usuário; ausente ou paidAt > 7 dias → 400
+  → PaymentIntent = invoicePayments.list({ invoice, status: "paid" })[0].payment.payment_intent
+       (a partir das APIs 2025-x, invoice.payment_intent não existe mais)
+     não achou → 422
+  → refunds.create({ payment_intent }, { idempotencyKey: "refund-<paymentId>" })
+  → Payment.status = REFUNDED
+  → cancelamento imediato
+  → credits = max(0, credits - PLAN_CONFIG[plano].beneficio)
+```
+
+Ordem importa: reembolso na Stripe primeiro, estado local depois. Um reembolso que falha
+deixa o cliente pago e intocado — a direção segura de falhar. A idempotency key impede
+reembolso duplo quando a pessoa repete o pedido depois de uma falha no meio.
+
+### 5.6 Assinatura em dobro
+
+Duas proteções no `createCheckout`:
+
+1. Usuário com `stripeSubscriptionId` e status diferente de `canceled` → **409**. Trocar de
+   plano não é checkout novo: a assinatura antiga ficaria órfã, cobrando todo mês.
+2. A sessão de checkout anterior (`User.stripeCheckoutSessionId`) é consultada antes de
+   criar outra:
+   - `open` → `checkout.sessions.expire` (ninguém consegue mais pagar por ela);
+   - `complete` → **409**: o pagamento aconteceu e o webhook ainda não chegou;
+   - `expired` ou inexistente → segue.
+
+Sem o item 2, duas abas de `/plans` (ou um duplo clique) abrem duas sessões antes de qualquer
+webhook chegar, e as duas podem ser pagas.
 
 ---
 
@@ -302,8 +391,10 @@ caminhos precisam ser convergentes (mesmo resultado final), o que os torna idemp
 
 | Método | Rota | Proteção | Descrição |
 |---|---|---|---|
-| `POST` | `/payments/checkout` | autenticado + e-mail verificado | Body `{ plan }`. Retorna `{ url }` para redirecionar. |
-| `POST` | `/payments/cancel` | autenticado + e-mail verificado | Cancela a assinatura do usuário do token. |
+| `POST` | `/payments/checkout` | autenticado + e-mail verificado | Body `{ plan }`. Retorna `{ url }` para redirecionar. `409` se já assina. |
+| `POST` | `/payments/cancel` | autenticado + e-mail verificado | Agenda o fim para o fim do período pago. |
+| `POST` | `/payments/resume` | autenticado + e-mail verificado | Desfaz o cancelamento agendado. |
+| `POST` | `/payments/refund` | autenticado + e-mail verificado | Reembolso da última cobrança em até 7 dias; encerra o plano. |
 | `GET` | `/payments/user` | autenticado + e-mail verificado | Histórico **do próprio** usuário (mais recentes primeiro). |
 | `GET` | `/payments/user/:userId` | autenticado + **ADMIN** | Histórico de qualquer usuário. |
 | `GET` | `/payments` | autenticado + **ADMIN** | Todas as cobranças. |
@@ -346,7 +437,11 @@ frontend só esconde botões; não é controle de acesso.
 - [ ] Handlers que não encontram o usuário retornam sem erro (evento órfão de outro ambiente
       não deve gerar 500 e loop de reentrega).
 - [ ] Eventos de tipo desconhecido retornam `200`.
-- [ ] Cancelamento manual e webhook de cancelamento produzem o mesmo estado final.
+- [ ] `checkout.session.completed` reentregue não credita de novo (filtro pela assinatura).
+- [ ] Handlers de fatura não dependem da ordem de chegada (fallback pela metadata da assinatura).
+- [ ] Eventos de assinatura casam pelo id da assinatura, não só pelo cliente.
+- [ ] No máximo uma sessão de checkout aberta por usuário.
+- [ ] Reembolso com idempotency key.
 
 ---
 
@@ -363,6 +458,12 @@ frontend só esconde botões; não é controle de acesso.
 | Vazamento de faturas entre usuários | `userId` do token nas rotas próprias; parâmetro só em rotas admin. |
 | Segredos em código | Todos os IDs e chaves em env, com falha no boot se ausentes. |
 | Mudança de API da Stripe | Versão da API fixada explicitamente no cliente. |
+| Duas assinaturas para a mesma pessoa | 409 para quem já assina + expiração da sessão de checkout anterior. |
+| Fatura antes do checkout (ordem de eventos) | Metadata também na assinatura; handler busca por ela. |
+| Evento atrasado rebaixa quem assinou de novo | Filtro por `stripeSubscriptionId` nos eventos de assinatura e fatura. |
+| Cancelar tira o período já pago | `cancel_at_period_end`; rebaixa só no `customer.subscription.deleted`. |
+| Conta excluída continua sendo cobrada | Cancelamento na Stripe antes do `DELETE`. |
+| Chave de teste em produção (ou live em dev) | Boot recusa a combinação. |
 
 ---
 

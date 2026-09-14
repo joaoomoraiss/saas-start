@@ -1,0 +1,84 @@
+name: CI
+
+# Fica na raiz do repositorio: o GitHub so le .github/ aqui. Um workflow dentro
+# de backend/.github nunca roda.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      # O postinstall roda `prisma generate`: sem o client gerado, nada compila.
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint:check
+
+      - name: Build
+        run: npm run build
+
+      - name: Testes unitarios
+        run: npm test
+
+      # Sem servico de banco: a suite e2e sobe um Postgres em memoria (PGlite)
+      # dentro do proprio processo de teste.
+      - name: Testes e2e
+        run: npm run test:e2e
+
+  frontend:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Lint
+        run: npm run lint
+
+      # `next build` tambem faz a checagem de tipos.
+      - name: Build
+        run: npm run build
+
+  docker:
+    runs-on: ubuntu-latest
+    needs: [backend, frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Imagem da API
+        run: docker build --target runtime -t saas-start-backend ./backend
+
+      - name: Imagem das migrations
+        run: docker build --target migrate -t saas-start-migrate ./backend
+
+      - name: Imagem do front
+        run: docker build -t saas-start-frontend ./frontend
