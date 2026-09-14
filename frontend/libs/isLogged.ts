@@ -1,11 +1,17 @@
-"use server";
+/**
+ * Checagem de sessao para Client Components (ex.: header, pricing).
+ *
+ * Pergunta ao BFF em vez de ler cookie: os cookies de sessao sao httpOnly, e
+ * so o servidor sabe se o refresh token ainda vale.
+ */
+export async function isLogged(): Promise<boolean> {
+  try {
+    const response = await fetch("/api/auth/session", { cache: "no-store" });
+    if (!response.ok) return false;
 
-import { verifyJwtToken } from "./auth";
-import { getToken } from "./getToken";
-
-/** Checagem de sessão para Client Components (ex.: header, pricing). */
-export async function isLogged() {
-  const token = await getToken("refreshToken");
-
-  return (await verifyJwtToken(token)) !== null;
+    const data = (await response.json()) as { authenticated?: boolean };
+    return data.authenticated === true;
+  } catch {
+    return false;
+  }
 }

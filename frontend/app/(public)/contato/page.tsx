@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { siteConfig } from "@/libs/siteConfig";
 import ContentShell from "@/components/contentShell";
+import ContactForm from "@/components/contactForm";
 
 const description =
   `Fale com a equipe do ${siteConfig.name}. Tire dúvidas sobre planos, suporte, parcerias ou imprensa.`;
@@ -23,9 +24,12 @@ export default function ContatoPage() {
       title="Contato"
       subtitle="Estamos por aqui para ajudar com dúvidas, suporte, parcerias ou imprensa."
     >
+      <h2>Envie uma mensagem</h2>
+      <ContactForm />
+
       <h2>Suporte</h2>
       <p>
-        Precisa de ajuda com sua conta, créditos ou geração de vídeos? Escreva
+        Precisa de ajuda com sua conta, créditos ou assinatura? Escreva
         para{" "}
         <a href={`mailto:${siteConfig.emails.support}`}>{siteConfig.emails.support}</a> e
         respondemos o mais rápido possível.

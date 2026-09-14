@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { siteConfig } from "@/libs/siteConfig";
 import ContentShell from "@/components/contentShell";
+import CookiePreferences from "@/components/cookiePreferences";
 
 const description =
   `Política de Cookies do ${siteConfig.name}: o que são, como utilizamos e como você pode gerenciá-los.`;
@@ -47,15 +48,27 @@ export default function PoliticaDeCookiesPage() {
         </li>
         <li>
           <strong>Analíticos:</strong> ajudam a entender o uso da plataforma de
-          forma agregada e anônima.
+          forma agregada (Google Analytics). Só são ativados se você clicar em
+          &quot;Aceitar&quot; no aviso de cookies.
         </li>
       </ul>
+      <p>
+        A verificação de segurança do cadastro (Cloudflare Turnstile) não grava
+        cookies de rastreamento e funciona mesmo se você recusar os cookies
+        analíticos.
+      </p>
 
       <h2>3. Como gerenciar cookies</h2>
       <p>
-        Você pode bloquear ou apagar cookies nas configurações do seu navegador.
-        Observe que desativar cookies essenciais pode impedir o funcionamento
-        correto de partes da plataforma.
+        Você pode mudar sua escolha a qualquer momento. Ao revogar, apagamos os
+        cookies analíticos já gravados e o aviso aparece de novo.
+      </p>
+      <p>
+        <CookiePreferences />
+      </p>
+      <p>
+        Você também pode bloquear ou apagar cookies nas configurações do
+        navegador. Desativar cookies essenciais impede o login.
       </p>
 
       <h2>4. Cookies de terceiros</h2>

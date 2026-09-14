@@ -1,397 +1,309 @@
 ---
 name: API_ROUTES
-description: Use SEMPRE que for construir, integrar ou debugar o FRONTEND, ou quando precisar saber qual rota chamar, o formato exato do request (body/params/headers) ou o shape da response de qualquer endpoint do backend NestJS. Mapa completo e fiel de TODAS as rotas da API.
+description: Use SEMPRE que for construir, integrar ou debugar o FRONTEND, ou quando precisar saber qual rota chamar, o formato exato do request (body/params) ou o shape da response de qualquer endpoint do backend NestJS. Mapa das rotas da API e de como o frontend chega nelas (BFF em /api).
 ---
 
 # Mapa da API (contrato Frontend ↔ Backend)
 
-> **Para o agente de frontend:** este arquivo é a fonte de verdade das rotas. Cada endpoint
-> abaixo traz: método, path, guards (auth necessária), request (params/body/headers) e o shape
-> exato da response. Os shapes foram extraídos direto dos controllers, services e do
-> `schema.prisma` — confie neles.
+> Fonte de verdade das rotas. Shapes extraídos dos controllers, services e do
+> `schema.prisma`. Se divergir do código, o código vence — corrija este arquivo.
 
 ---
 
-## 0. Convenções globais (LEIA PRIMEIRO)
+## 0. Como o frontend chama a API (LEIA PRIMEIRO)
+
+**O browser nunca fala direto com o backend.** Tudo passa pelas rotas `/api/*`
+do próprio Next (BFF):
+
+| Chamada no browser | Vira no backend |
+|---|---|
+| `api.get("/user/profile")` (axios de `libs/api.ts`, baseURL `/api`) | `GET {BACKEND_URL}/user/profile` |
+| `POST /api/auth/login` | handler próprio: grava cookies `accessToken` + `refreshToken` (httpOnly) |
+| `POST /api/auth/logout` | handler próprio: revoga a sessão e apaga os cookies |
+| `GET /api/auth/session` | handler próprio: `{ authenticated, role }` |
+| `/api/<qualquer rota>` | `app/api/[...path]/route.ts` repassa com `Authorization: Bearer`, `X-Service-Token` e `X-Client-IP` |
+
+Consequências:
+
+- **Nenhum token chega ao JavaScript.** Não guarde token, não mande
+  `Authorization` do client, não use `withCredentials`.
+- O BFF renova a sessão sozinho quando o access token expira.
+- Quando o backend recusa a sessão, a resposta vem com o header
+  `x-session-expired: 1` e o interceptor de `libs/api.ts` manda para `/login`.
+  Um 401 sem esse header (ex.: "senha atual incorreta") **não** desloga.
+- `/api/auth/refresh-token` e `/api/payments/webhook` são bloqueadas no BFF (404).
+- Rotas novas do backend ficam disponíveis em `/api/...` sem código extra.
+
+### Backend
 
 | Item | Valor |
 |---|---|
-| **Base URL (dev)** | `http://localhost:8080` (`.env` define `PORT=8080`; se ausente, o Nest cai em `3000`) |
-| **Base URL (prod)** | domínio de produção |
-| **Prefixo global** | ❌ **Nenhum** — as rotas ficam na raiz (NÃO existe `/api`) |
-| **CORS** | `origin: FRONTEND_URL` (env), `credentials: true` |
-| **Headers permitidos** | `Content-Type`, `Authorization` |
-| **Métodos permitidos** | GET, POST, PUT, PATCH, DELETE, OPTIONS |
+| **Base URL (dev)** | `http://localhost:8080` (`BACKEND_URL` no front) |
+| **Prefixo global** | nenhum (no backend; o `/api` é do Next) |
+| **Validação** | `ValidationPipe` global com `whitelist` + `forbidNonWhitelisted`: campo inválido **ou não declarado** no DTO → **400** |
+| **Rate limit** | global 120 req/min por IP; rotas sensíveis mais apertadas (tabela no §6). Excedeu → **429** |
 
-### Autenticação
-- O backend lê o token **do header** `Authorization: Bearer <accessToken>`.
-  ⚠️ Apesar de o login também gravar um cookie `refreshToken`, **as rotas protegidas NÃO leem o
-  cookie** — você precisa mandar o `accessToken` no header em toda requisição autenticada.
-- `accessToken` (chamado `token` nas responses) expira conforme `ACCESS_TOKEN_TTL` (default **15m**).
-- `refreshToken` expira conforme `REFRESH_TOKEN_TTL_DAYS` (default **30 dias**) e é gravado como cookie `httpOnly` (você não consegue lê-lo
-  via JS; ele é reenviado automaticamente para `POST /auth/refresh-token` por causa do `credentials`).
-- **Faça `fetch`/`axios` com `credentials: 'include'` / `withCredentials: true`** para o cookie ir/voltar.
+### Guards
 
-### Guards (o que cada rota exige)
-| Guard | Significado para o frontend |
+| Guard | Efeito |
 |---|---|
-| `AuthGuard` | Precisa de `Authorization: Bearer <token>` válido. Sem ele → **401**. |
-| `VerifiedEmailGuard` | Precisa que o usuário tenha `isVerified: true` (email confirmado). Senão → **403 "Email not verified"**. Vale mesmo com `REQUIRE_EMAIL_VERIFICATION=false`. |
-| `RoleGuard` + `@RequiredRoles(...)` | Precisa de role específica (ex.: `ADMIN`). Senão → **403**. |
+| `AuthGuard` | access token válido. Sem ele → **401**. Role lida do banco, não do token. |
+| `VerifiedEmailGuard` | `isVerified: true`. Senão → **403 "Email not verified"**. Vale mesmo com `REQUIRE_EMAIL_VERIFICATION=false`. |
+| `RoleGuard` + `@RequiredRoles('ADMIN')` | papel ADMIN. Senão → **403**. |
+| `PoliciesGuard` (CASL) | dono do registro ou ADMIN. Senão → **403**. |
+| `ServiceTokenGuard` | só o servidor Next (header `X-Service-Token`). Senão → **401**. |
 
-### ⚠️ Validação de input (importante)
-Há um `ValidationPipe` global (`src/app.setup.ts`) com `whitelist`, `forbidNonWhitelisted` e
-`transform`. Na prática:
-- os decorators `class-validator` dos DTOs **são** aplicados em runtime — payload inválido volta **400**;
-- mandar um campo que o DTO não declara **também** dá 400 (não é ignorado silenciosamente).
+### Shapes
 
-Continue validando no cliente para dar feedback rápido, mas o servidor é a garantia.
-
-### Shapes base dos models (referência das responses)
-
-**User** (retornado cru em algumas rotas). O hash de senha é omitido no nível do client
-Prisma, então **não** vem nessas responses:
+**UserProfile** (`GET /user/profile`):
 ```ts
 {
-  id: string;            // uuid
-  name: string | null;   // opcional no cadastro
+  name: string | null;
   email: string;
-  role: "USER" | "ADMIN";
-  isVerified: boolean;
-  stripeCustomerId: string | null;
-  stripeSubscriptionId: string | null;
-  subscriptionStatus: string | null;   // "active" | "canceled" | "past_due" | null
   plan: "FREE" | "STANDARD" | "PRO";
-  credits: number;       // default 0 (todo novo usuário começa sem créditos)
-  createdAt: string;     // ISO date
-  updatedAt: string;     // ISO date
+  credits: number;
+  subscriptionStatus: "active" | "past_due" | "canceling" | "canceled" | null;
+  isVerified: boolean;
 }
 ```
+`canceling` = cancelamento agendado; o plano pago vale até o fim do período.
 
-**Payment** (histórico de cobranças — uma linha por fatura paga na Stripe):
+**User** (rotas de admin). Nunca traz `password`:
 ```ts
 {
-  id: string;                        // uuid
-  userId: string;
-  plan: "FREE" | "STANDARD" | "PRO"; // plano pago naquela cobrança
-  amount: number;                    // ⚠️ em CENTAVOS (ex.: 1990 = R$ 19,90)
-  currency: string;                  // ex.: "brl"
-  status: "PAID" | "FAILED" | "REFUNDED";
-  stripeInvoiceId: string;           // id da invoice na Stripe (único)
-  stripeCustomerId: string | null;
-  stripeSubscriptionId: string | null;
-  hostedInvoiceUrl: string | null;   // 🧾 RECIBO (página Stripe): https://invoice.stripe.com/i/...
-  invoicePdfUrl: string | null;      // 🧾 PDF da fatura para download
-  paidAt: string;                    // ISO date — quando a fatura foi paga
-  createdAt: string;                 // ISO date
-  updatedAt: string;                 // ISO date
+  id: string; name: string | null; email: string; role: "USER" | "ADMIN";
+  isVerified: boolean; plan: "FREE" | "STANDARD" | "PRO"; credits: number;
+  subscriptionStatus: string | null;
+  stripeCustomerId: string | null; stripeSubscriptionId: string | null;
+  stripeCheckoutSessionId: string | null;
+  createdAt: string; updatedAt: string;
 }
 ```
-> 🧾 **Recibo:** abra `hostedInvoiceUrl` num link/botão "ver recibo" e `invoicePdfUrl` num "baixar PDF".
-> `amount` vem em centavos — divida por 100 para exibir (`(amount/100).toLocaleString('pt-BR', {style:'currency', currency})`).
 
-### Shape de erro (padrão NestJS)
+**Payment**:
 ```ts
-{ statusCode: number; message: string | string[]; error?: string }
+{
+  id: string;
+  userId: string | null;             // null só em registros de contas excluídas
+  plan: "FREE" | "STANDARD" | "PRO"; // plano naquela cobrança
+  amount: number;                    // ⚠️ CENTAVOS (1990 = R$ 19,90)
+  currency: string;                  // "brl"
+  status: "PAID" | "FAILED" | "REFUNDED";
+  stripeInvoiceId: string;
+  stripeCustomerId: string | null;
+  stripeSubscriptionId: string | null;
+  hostedInvoiceUrl: string | null;   // recibo na Stripe
+  invoicePdfUrl: string | null;      // PDF
+  paidAt: string; createdAt: string; updatedAt: string;
+}
 ```
 
----
-
-## 1. App / Health
-
-### `GET /`
-- **Guards:** nenhum (público)
-- **Request:** —
-- **Response 200:** `"Hello World!"` (texto puro, não JSON)
+**Erro** (padrão NestJS): `{ statusCode: number; message: string | string[]; error?: string }`
 
 ---
 
-## 2. Auth — `/auth` (todas públicas, sem guard)
+## 1. Health
 
-### `POST /auth/register`
-Cria o usuário e dispara o email de confirmação. **Não loga** nem retorna token.
-- **Body:**
-  ```ts
-  { name: string; email: string; password: string }  // password mínimo 6 chars (contrato)
-  ```
-- **Response 201:** corpo vazio (a função não retorna nada). Trate sucesso como "email enviado".
-- **Erros:** `422` se email já existe (`"User with this email already exists"`).
+### `GET /health`
+- Público, fora do rate limit.
+- **200** `{ "status": "ok" }` · **503** se o banco não responde.
 
-### `POST /auth/login`
-- **Body:**
-  ```ts
-  { email: string; password: string }
-  ```
-- **Efeito colateral:** grava cookie `refreshToken` (httpOnly).
-- **Response 200:**
-  ```ts
-  { token: string; refreshToken: string }   // token = accessToken (7d); guarde-o e mande no header
-  ```
-- **Erros:** lança `"Invalid credentials"` (vira **500** genérico, pois é `new Error`, não exceção HTTP) quando email não existe ou senha errada.
+---
 
-### `POST /auth/confirm`
-Confirma o email a partir do token recebido no link enviado por email.
-- **Body:** `{ token: string }`
-- **Response 201:** corpo vazio (apenas marca `isVerified = true`).
-- **Erros:** `401` token inválido/expirado; `404` usuário não encontrado.
+## 2. Auth — `/auth` (públicas)
 
-### `POST /auth/verify-email`
-Reenvia o email de confirmação.
-- **Body:** `{ email: string }`
-- **Response 200:** corpo vazio.
-- **Erros:** `404` usuário não encontrado; erro se já verificado (`UserAlreadyVerifiedException`).
+### `POST /auth/register` · limite 10/hora
+- **Body:** `{ email: string; password: string; name?: string; captchaToken?: string }`
+  - `password`: senha forte (validador `IsStrongPassword`).
+  - `captchaToken`: token do Cloudflare Turnstile. Exigido quando o backend
+    tem `TURNSTILE_SECRET_KEY` (componente `components/turnstile`, action
+    `"register"`). O token é de uso único: depois de um erro, gere outro.
+- **201** `{ id: string; email: string }`. Não loga. Dispara e-mail de confirmação.
+- **Erros:** `400` validação ou `"Captcha verification failed"` · `422` e-mail já existe.
 
-### `POST /auth/forgot-password`
-Dispara email com link de reset.
-- **Body:** `{ email: string }`
-- **Response 201:** corpo vazio.
-- **Erros:** `404` usuário não encontrado.
+### `POST /auth/login` · limite 10/min
+- No front: **`POST /api/auth/login`** (grava os cookies).
+- **Body:** `{ email: string; password: string }`
+- **200** no BFF: `{ ok: true }`. No backend: `{ token }` + cookie `refreshToken`.
+- **Erros:** `401 "Invalid credentials"` · `401 "Email not verified"` (se `REQUIRE_EMAIL_VERIFICATION=true`) · `429`.
 
-### `POST /auth/reset-password`
+### `POST /auth/confirm` · limite 10/hora
+- **Body:** `{ token: string }` (do link `/confirm?token=`)
+- **204** · **401** token inválido/expirado · **404** usuário não existe.
+
+### `POST /auth/verify-email` · limite 5/hora
+- Reenvia a confirmação. **Body:** `{ email: string }`
+- **202** sempre (não revela se a conta existe).
+
+### `POST /auth/forgot-password` · limite 5/hora
+- **Body:** `{ email: string }` · **202** sempre.
+
+### `POST /auth/reset-password` · limite 10/hora
 - **Body:** `{ token: string; newPassword: string }`
-- **Response 200:** corpo vazio.
-- **Erros:** `401` token inválido/expirado; `404` usuário não encontrado.
+- **204**. O link é de **uso único** e **derruba todas as sessões** do usuário.
+- **Erros:** `400` senha fraca · `401` token inválido, expirado ou já usado.
 
-### `POST /auth/refresh-token`
-Usa o cookie `refreshToken` (mande `credentials: 'include'`). Não precisa de body.
-- **Request:** sem body; depende do cookie `refreshToken`.
-- **Efeito colateral:** regrava o cookie `refreshToken`.
-- **Response 200:**
-  ```ts
-  { token: string; refreshToken: string }   // novo accessToken
-  ```
-- **Erros:** `401` se cookie ausente/inválido ou usuário não existe.
+### `POST /auth/refresh-token` · limite 60/min
+- **Uso interno do BFF.** Bloqueada em `/api` (404).
+- Rotaciona a sessão: o refresh antigo é revogado. Reapresentar um refresh já
+  rotacionado depois de 30 s derruba todas as sessões (detecção de roubo).
 
 ### `POST /auth/logout`
-- **Request:** sem body.
-- **Efeito colateral:** limpa o cookie `refreshToken`.
-- **Response 200:** `{ message: "Logged out successfully" }`
+- No front: **`POST /api/auth/logout`**. **204**. Revoga a sessão no banco.
 
-## 3. User — `/user`
+---
 
-### `POST /user` — criar usuário (AuthGuard + ADMIN)
-> Prefira `POST /auth/register` no fluxo normal (este não dispara email de confirmação).
-- **Body** (`CreateUserDto`):
-  ```ts
-  { email: string; password: string; name?: string }
-  ```
-  ⚠️ `role` **não** é aceito: promover a ADMIN é estado de segurança, não campo de formulário.
-  Mandá-lo dá 400 (`forbidNonWhitelisted`).
-- **Response 201:** objeto **User** (a role sai sempre como `"USER"`).
-- **Erros:** `422` se email já existe.
+## 3. User — `/user` (todas com `AuthGuard`)
 
-### `GET /user/profile` — perfil do usuário logado ⭐
-- **Guards:** `AuthGuard` (apenas login; **não** exige email verificado).
-- **Request:** `Authorization: Bearer <token>`.
-- **Response 200** (shape enxuto e seguro — sem password):
+### `GET /user/profile`
+- Sem exigir e-mail confirmado (o front usa `isVerified` para o aviso).
+- **200** `UserProfile`.
+
+### `PATCH /user/profile` · + `VerifiedEmailGuard`
+- **Body:** `{ name?: string }` (id vem do token) · **200** `UserProfile`.
+
+### `PATCH /user/password` · + `VerifiedEmailGuard` · limite 5/hora
+- **Body:** `{ currentPassword: string; newPassword: string }`
+- **200** `{ message: "Password updated" }`. Derruba as **outras** sessões; a atual continua.
+- **Erros:** `401 "Current password is incorrect"` (não desloga) · `400` senha fraca · `403`.
+
+### `GET /user/me/export` · limite 10/hora
+- LGPD. Sem exigir e-mail confirmado. Responde com `Content-Disposition: attachment`.
+- No front: link `href="/api/user/me/export"` (constante `EXPORT_DATA_URL`).
+- **200**:
   ```ts
   {
-    name: string | null;
-    email: string;
-    plan: "FREE" | "STANDARD" | "PRO";
-    credits: number;
-    subscriptionStatus: string | null;  // "active" | "past_due" | "canceled" | null
-    isVerified: boolean;
+    exportedAt: string;
+    account: { id, email, name, role, isVerified, plan, credits, subscriptionStatus, createdAt, updatedAt };
+    payments: { plan, amount, currency, status, paidAt, hostedInvoiceUrl, invoicePdfUrl }[];
+    sessions: { createdAt, expiresAt, revokedAt, revokedReason }[];
   }
   ```
-- **Use esta** para header/avatar, saldo de créditos, plano atual, status da assinatura e flag de verificação.
-- **Erros:** `401` sem token; `404` usuário não encontrado.
 
-### `PATCH /user/profile` — editar o PRÓPRIO perfil ⭐
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard` (login + email verificado).
-- **Request:** `Authorization: Bearer <token>`. O id do usuário vem **do token**, NÃO do corpo nem da URL.
-- **Body** (`UpdateProfileDto`): `{ name?: string }` — hoje só `name` é editável (por segurança, não dá
-  para alterar `role`/`isVerified`/`email` por aqui).
-- **Response 200:** o profile enxuto atualizado (mesmo shape do `GET /user/profile`, sem `password`).
-- **Erros:** `401` sem token; `403` email não verificado; `404` usuário não encontrado.
-- **Use esta** para a tela "editar perfil" do usuário. ✅ É o jeito certo de deixar o usuário mudar o
-  nome — o frontend manda só `{ name }`, sem precisar saber o próprio id.
+### `DELETE /user/me` · limite 5/hora
+- LGPD. **Body:** `{ password: string }`
+- **204**. Cancela a assinatura na Stripe **antes**, apaga a conta e as
+  sessões. Cobranças ficam com `userId: null`.
+- **Erros:** `401 "Password is incorrect"` · `503` Stripe indisponível (nada é apagado).
+- Depois do sucesso, chame `signOut()` para limpar os cookies do navegador.
 
-### `PATCH /user/password` — trocar a PRÓPRIA senha 🔒
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard` (login + email verificado).
-- **Request:** `Authorization: Bearer <token>`. O id vem **do token** — o usuário só troca a própria senha.
-- **Body** (`ChangePasswordDto`):
-  ```ts
-  { currentPassword: string; newPassword: string }  // newPassword: mínimo 6 chars
-  ```
-- **Segurança:** exige a **senha atual** (conferida com `bcrypt.compare`) antes de aceitar a nova; a
-  nova é salva como **hash bcrypt** (nunca em texto puro). A `newPassword` deve ser diferente da atual.
-- **Response 200:** `{ message: "Password updated successfully" }`.
-- **Erros:**
-  - `401` sem token **ou** senha atual incorreta (`"Current password is incorrect"`).
-  - `403` email não verificado.
-  - `400` `newPassword` < 6 chars, igual à atual, ou campos ausentes.
-  - `404` usuário não encontrado.
-- **Frontend:** formulário com "senha atual" + "nova senha" (+ confirmação client-side). Em caso de
-  `401 "Current password is incorrect"`, destaque o campo de senha atual.
-  > ℹ️ A troca **não** invalida tokens/sessões já emitidos (JWT é stateless). Para forçar logout em
-  > outros dispositivos seria preciso versionar tokens — fora do escopo atual.
+### Admin
 
-### `GET /user` — listar todos
-- **Guards:** `AuthGuard` + `RoleGuard` + `VerifiedEmailGuard`, `@RequiredRoles(ADMIN, USER)`.
-- **Response 200:** `User[]` (objetos completos, ⚠️ incluem `password` hash).
-
-### `GET /user/:id` — buscar por id (AuthGuard + CASL: dono ou ADMIN)
-- **Param:** `id` (uuid).
-- **Response 200:** objeto **User** completo.
-- **Erros:** `404` `"User not found"`.
-
-### `PATCH /user/:id` — atualizar qualquer usuário (somente ADMIN)
-- **Guards:** `AuthGuard` + `RoleGuard` + `VerifiedEmailGuard`, `@RequiredRoles(ADMIN)`.
-  ⚠️ Mudou: antes aceitava `USER` (um usuário podia editar outro / se promover a ADMIN). Agora é
-  **só ADMIN**. Para o usuário editar a si mesmo, use `PATCH /user/profile`.
-- **Param:** `id` (uuid).
-- **Body** (`UpdateUserDto`, todos opcionais):
-  ```ts
-  { name?: string; email?: string; password?: string; role?: "USER"|"ADMIN"; isVerified?: boolean }
-  ```
-  `name`, `password` (re-hash), `email`, `role` e `isVerified` são aplicados pelo service.
-- **Response 200:** objeto **User** atualizado.
-- **Erros:** `403` se não for admin; `404` se não existir.
-
-### `DELETE /user/:id`
-- **Guards:** `AuthGuard` + `RoleGuard` + `VerifiedEmailGuard`, `@RequiredRoles(ADMIN)` (só admin).
-- **Param:** `id` (uuid).
-- **Response 200:** objeto **User** deletado.
-- **Erros:** `404` se não existir.
+| Método | Rota | Proteção | Body | Response |
+|---|---|---|---|---|
+| POST | `/user` | ADMIN | `{ email, password, name? }` | User |
+| GET | `/user` | ADMIN | — | User[] |
+| GET | `/user/:id` | dono ou ADMIN (CASL) | — | User |
+| PATCH | `/user/:id` | dono ou ADMIN (CASL) | `{ password? }` | User. Com senha, derruba as sessões |
+| DELETE | `/user/:id` | ADMIN | — | User. Cancela a assinatura antes |
 
 ---
 
 ## 4. Payments — `/payments` (Stripe)
 
-### Modelo de planos (assinatura)
-| Plano | Cobrança Stripe | Créditos por fatura paga |
+Sem Stripe configurada no backend, as rotas que falam com a Stripe respondem **503**.
+
+| Plano | Checkout | Créditos por cobrança |
 |---|---|---|
-| `FREE` | ❌ default, não passa por checkout | 0 |
-| `STANDARD` | ✅ mensal | 100 |
-| `PRO` | ✅ mensal | 400 |
+| `FREE` | não | 0 |
+| `STANDARD` | mensal | 100 |
+| `PRO` | mensal | 500 |
 
-- Créditos **acumulam**: cada fatura paga (assinatura nova ou renovação mensal) **soma** a cota do
-  plano ao saldo. Cancelar volta o usuário para `FREE` mas **não zera** os créditos restantes.
-- Todo usuário novo nasce `FREE` com `credits: 0`.
+Fonte: `backend/src/payments/plan.config.ts`.
 
-> **Auth:** todas as rotas de `/payments` exigem **login + email verificado** (`AuthGuard` +
-> `VerifiedEmailGuard`), **exceto** o `webhook` (público, chamado pela Stripe). As rotas de **admin** abaixo
-> acrescentam `RoleGuard` + `@RequiredRoles(ADMIN)`.
-
-### `POST /payments/checkout` — assinar / fazer upgrade
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard`.
-- **Body:** `{ plan: "STANDARD" | "PRO" }`  *(enum `Plan` do Prisma; `FREE` é rejeitado)*
-- **Response 200/201:** `{ url: string }` — **redirecione o navegador** para essa URL do Stripe Checkout.
+### `POST /payments/checkout` · `AuthGuard` + `VerifiedEmailGuard` · limite 10/hora
+- **Body:** `{ plan: "STANDARD" | "PRO" }`
+- **200** `{ url }`. Redirecione o navegador.
 - **Erros:**
-  - `400` `'Plan "FREE" does not require checkout'` — FREE não tem cobrança.
-  - `400` se o Stripe não retornar URL.
-  - `401` sem token.
-- **Pós-pagamento:** o Stripe redireciona para `${APP_DOMAIN}/success?session_id=...` (sucesso) ou
-  `${APP_DOMAIN}/plans` (cancelado). Crie essas páginas no frontend.
-- ⚠️ **A ativação do plano/créditos é assíncrona** (acontece via webhook, **não** na resposta do
-  checkout). Na página `/success`, faça **polling** em `GET /user/profile` até `plan`/`credits`
-  refletirem a compra.
+  - `400` plano `FREE` ou inválido;
+  - `409` já tem assinatura (`active`, `past_due` ou `canceling`), **ou** um checkout anterior já pago ainda não foi processado;
+  - `403` e-mail não confirmado.
+- Checkout anterior ainda aberto é expirado automaticamente.
+- Retorno: `/success?session_id=...` ou `/plans`. A liberação vem pelo
+  **webhook**: na `/success`, faça polling em `GET /user/profile`.
 
-### `POST /payments/cancel` — cancelar assinatura
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard`.
-- **Request:** sem body.
-- **Efeito:** cancela no Stripe, `subscriptionStatus = "canceled"` e volta para `plan = "FREE"`
-  (créditos já acumulados permanecem).
-- **Response 200:** `{ message: "Subscription canceled successfully" }`
-- **Erros:** `401` sem token; `403` email não verificado; `400` `"User has no active subscription"`.
+### `POST /payments/cancel` · limite 10/hora
+- Agenda o fim para o **fim do período já pago**. Status → `canceling`, plano continua.
+- **200** `{ message }` · **400** sem assinatura ou já agendado.
 
-### `GET /payments/user` — MINHAS cobranças ⭐
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard` (qualquer usuário logado + verificado).
-- **Request:** `Authorization: Bearer <token>`.
-- **Response 200:** `Payment[]` do usuário logado, ordenado por `paidAt desc` (mais recente primeiro).
-- **Use esta** para a tela "Histórico de pagamentos / Faturas" do usuário (com link de recibo).
+### `POST /payments/resume` · limite 10/hora
+- Desfaz o cancelamento agendado. Status → `active`.
+- **200** `{ message }` · **400** se não há cancelamento agendado.
 
-### `GET /payments/user/:userId` — cobranças de um usuário (ADMIN)
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
-- **Param:** `userId` (uuid).
-- **Response 200:** `Payment[]` daquele usuário, `paidAt desc`.
-- **Erros:** `403` se não for admin.
+### `POST /payments/refund` · limite 5/hora
+- Direito de arrependimento (CDC Art. 49): reembolso integral da última
+  cobrança paga, se feita há até **7 dias**. Encerra o plano **na hora** e
+  remove os créditos daquela cobrança.
+- **200** `Payment` (status `REFUNDED`).
+- **Erros:** `400` sem cobrança na janela · `422` cobrança original não localizada.
 
-### `GET /payments` — todas as cobranças (ADMIN)
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
-- **Response 200:** `Payment[]` (todas), `paidAt desc`.
-- **Erros:** `403` se não for admin.
+### `GET /payments/user` · `AuthGuard` + `VerifiedEmailGuard`
+- **200** `Payment[]` do usuário do token, `paidAt desc`.
 
-### `DELETE /payments/:id` — apagar um registro (ADMIN)
-- **Guards:** `AuthGuard` + `VerifiedEmailGuard` + `RoleGuard`, `@RequiredRoles(ADMIN)`.
-- **Param:** `id` (uuid do Payment).
-- **Response 200:** objeto **Payment** removido.
-- **Erros:** `403` se não for admin; `404` `"Payment not found"`.
+### Admin
 
-### `POST /payments/webhook` — ⚠️ só Stripe, NÃO chamar do frontend
-- Recebe eventos do Stripe (`stripe-signature` header + rawBody). Registrado no dashboard do Stripe.
-- Eventos tratados e efeito:
-  | Evento | Efeito |
-  |---|---|
-  | `checkout.session.completed` | grava `plan`, `subscriptionStatus = active`, soma créditos da cota |
-  | `invoice.payment_succeeded` | **cria/atualiza um `Payment`** (recibo) e, se `subscription_cycle` (renovação), soma de novo os créditos da cota |
-  | `invoice.payment_failed` | `subscriptionStatus = past_due` |
-  | `customer.subscription.deleted` | `subscriptionStatus = canceled`, volta para `plan = FREE` |
-- Listado aqui só para completude. **O frontend nunca chama isto** — mas é por causa dele que a
-  liberação após o checkout é assíncrona (releia `GET /user/profile`).
+| Método | Rota | Response |
+|---|---|---|
+| GET | `/payments/user/:userId` | Payment[] |
+| GET | `/payments` | Payment[] |
+| DELETE | `/payments/:id` | Payment · `404` se não existe |
+
+### `POST /payments/webhook`: só a Stripe chama
+- Assinatura em `stripe-signature` + raw body. Fora do rate limit. Bloqueada no BFF.
+
+| Evento | Efeito |
+|---|---|
+| `checkout.session.completed` | ativa a assinatura e soma os créditos (idempotente) |
+| `invoice.payment_succeeded` | grava o `Payment`; na renovação (`subscription_cycle`) soma créditos |
+| `invoice.payment_failed` | `past_due` (sem rebaixar) |
+| `customer.subscription.updated` | sincroniza `canceling` / `active` / `past_due` |
+| `customer.subscription.deleted` | `canceled` + `FREE` |
 
 ---
 
-## 6. Resumo rápido (tabela de bolso)
+## 5. Contato
 
-| Método | Rota | Auth | Request | Response |
-|---|---|---|---|---|
-| GET | `/` | — | — | `"Hello World!"` |
-| POST | `/auth/register` | — | `{name,email,password}` | vazio |
-| POST | `/auth/login` | — | `{email,password}` | `{token,refreshToken}` + cookie |
-| POST | `/auth/confirm` | — | `{token}` | vazio |
-| POST | `/auth/verify-email` | — | `{email}` | vazio |
-| POST | `/auth/forgot-password` | — | `{email}` | vazio |
-| POST | `/auth/reset-password` | — | `{token,newPassword}` | vazio |
-| POST | `/auth/refresh-token` | cookie | — | `{token,refreshToken}` |
-| POST | `/auth/logout` | — | — | `{message}` |
-| POST | `/user` | — | `CreateUserDto` | User |
-| GET | `/user/profile` | Bearer | — | `{name,email,plan,credits,subscriptionStatus,isVerified}` |
-| PATCH | `/user/profile` | Bearer+verif. | `{name?}` | profile atualizado |
-| PATCH | `/user/password` | Bearer+verif. | `{currentPassword,newPassword}` | `{message}` · `401` se senha atual errada |
-| GET | `/user` | Bearer+ADMIN/USER+verif. | — | User[] |
-| GET | `/user/:id` | — | — | User |
-| PATCH | `/user/:id` | Bearer+ADMIN+verif. | `UpdateUserDto` | User |
-| DELETE | `/user/:id` | Bearer+ADMIN+verif. | — | User |
-| POST | `/payments/checkout` | Bearer+verif. | `{plan: "STANDARD"\|"PRO"}` | `{url}` · `400` se `FREE` |
-| POST | `/payments/cancel` | Bearer+verif. | — | `{message}` |
-| GET | `/payments/user` | Bearer+verif. | — | Payment[] (minhas) |
-| GET | `/payments/user/:userId` | Bearer+verif.+ADMIN | — | Payment[] |
-| GET | `/payments` | Bearer+verif.+ADMIN | — | Payment[] |
-| DELETE | `/payments/:id` | Bearer+verif.+ADMIN | — | Payment |
-| POST | `/payments/webhook` | Stripe | rawBody+sig | `{received:true}` |
+### `POST /contact` · `ServiceTokenGuard` · limite 5/hora
+- Só via BFF (`/api/contact`). Chamada direta ao backend → 401.
+- **Body:** `{ name: string (2–80); email: string; message: string (10–5000) }`
+- **202** `{ sent: true }`. Envia para `CONTACT_EMAIL` com resposta para o e-mail informado.
+- **Erros:** `400` validação · `429` · `503` sem `CONTACT_EMAIL` ou Resend indisponível.
 
 ---
 
-## 7. Fluxos típicos do frontend
+## 6. Resumo
 
-**Cadastro → verificação → uso:**
-1. `POST /auth/register` → mostra "confira seu email".
-2. Usuário clica no link → sua página chama `POST /auth/confirm` com o `token` da URL.
-3. `POST /auth/login` → guarde `token`; mande-o em `Authorization` daí em diante.
-4. `GET /user/profile` → header, créditos, `isVerified`.
-
-**Assinatura:**
-1. Tela de planos: mostre FREE/STANDARD/PRO (as cotas de cada plano são definidas pelo backend). O plano atual vem de
-   `GET /user/profile` (`plan` + `subscriptionStatus`).
-2. Botão assinar/upgrade → `POST /payments/checkout` com `{plan: "STANDARD" | "PRO"}` → redirecione
-   para `url`. `FREE` não tem checkout (retorna 400).
-3. Stripe volta para `/success` (sucesso) ou `/plans` (cancelado). Como a liberação é **assíncrona via
-   webhook**, na `/success` faça **polling** em `GET /user/profile` até `plan`/`credits` atualizarem.
-4. Cancelar → `POST /payments/cancel` (volta para `FREE`, mantém créditos restantes).
-5. **Histórico / recibos:** `GET /payments/user` → lista de `Payment[]`. Para cada um, mostre
-   `plan`, `amount/100` formatado em `currency`, `paidAt`, e botões para `hostedInvoiceUrl` (ver
-   recibo na Stripe) e `invoicePdfUrl` (baixar PDF). Cada fatura paga (inclusive renovações) vira
-   uma linha aqui automaticamente via webhook.
+| Método | Rota (backend) | Auth | Limite |
+|---|---|---|---|
+| GET | `/health` | — | sem limite |
+| POST | `/auth/register` | — (+ captcha) | 10/h |
+| POST | `/auth/login` | — | 10/min |
+| POST | `/auth/confirm` | — | 10/h |
+| POST | `/auth/verify-email` | — | 5/h |
+| POST | `/auth/forgot-password` | — | 5/h |
+| POST | `/auth/reset-password` | — | 10/h |
+| POST | `/auth/refresh-token` | cookie (só BFF) | 60/min |
+| POST | `/auth/logout` | cookie | global |
+| GET | `/user/profile` | login | global |
+| PATCH | `/user/profile` | login + verificado | global |
+| PATCH | `/user/password` | login + verificado | 5/h |
+| GET | `/user/me/export` | login | 10/h |
+| DELETE | `/user/me` | login + senha | 5/h |
+| POST | `/payments/checkout` | login + verificado | 10/h |
+| POST | `/payments/cancel` | login + verificado | 10/h |
+| POST | `/payments/resume` | login + verificado | 10/h |
+| POST | `/payments/refund` | login + verificado | 5/h |
+| GET | `/payments/user` | login + verificado | global |
+| POST | `/contact` | SERVICE_TOKEN | 5/h |
+| POST | `/payments/webhook` | assinatura Stripe | sem limite |
 
 ---
 
-## 8. Armadilhas / observações para o frontend
+## 7. Armadilhas
 
-- **Sem prefixo `/api`** — chame as rotas na raiz da base URL.
-- **Porta dev = 8080** (via `.env`), não 3000. O frontend dev roda em `:3000` (origin do CORS).
-- **`refreshToken` é cookie httpOnly** — não tente lê-lo via JS; use `credentials:'include'` e deixe `/auth/refresh-token` regravá-lo.
-- **`login` com credenciais inválidas retorna 500** (não 401), porque o service usa `new Error` cru. Trate erro genérico de login.
-- **Várias rotas retornam o `User` cru com `password`** (hash) — nunca renderize esse campo. Para dados de perfil seguros use `GET /user/profile`.
-- **`durationInSeconds` (request) ≠ `durationInFrames` (response).** O backend só devolve frames.
+- **Não chame o backend direto do browser.** Use `libs/api.ts` (baseURL `/api`).
+- **Nada de trailing slash** (`auth/register/`): o Next redireciona e o POST se perde.
+- `sendEmailVerification` e `forgot-password` respondem **202**, não 200.
+- Status `canceling` ainda é plano pago: não trate como cancelado.
+- `amount` em centavos.
+- Mensagens de erro do backend estão em inglês: traduza por status na UI.

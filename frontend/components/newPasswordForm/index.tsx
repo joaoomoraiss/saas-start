@@ -3,6 +3,7 @@
 import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
+import axios from "axios";
 import api from "@/libs/api";
 import InputField from "../inputField";
 
@@ -96,31 +97,25 @@ export default function NewPasswordForm() {
     setErrMsg("");
 
     try {
-      const response = await api.post(
-        `auth/reset-password`,
-        { "token": token, "newPassword": password },
-        { headers: { "Content-Type": "application/json" }, withCredentials: true }
-      );
+      await api.post("auth/reset-password", { token, newPassword: password });
 
-      if (response.status === 204 || response.status === 200) {
-        setSuccessMsg("Sua senha foi redefinida com sucesso!");
-        setPassword("");
-        setConfirmPassword("");
-        setSubmitted(false);
-        setTimeout(() => router.push("/login"), 3000);
-      } else {
-        if (response.status === 400) {
-          setErrMsg("Dados inválidos. Verifique os campos.");
-        } else if (response.status === 401) {
-          setErrMsg("Token inválido ou expirado. Solicite uma nova redefinição.");
-        } else if (response.status === 422) {
-          setErrMsg("Senha não atende aos critérios de segurança.");
-        } else {
-          setErrMsg("Erro ao redefinir senha. Tente novamente.");
-        }
-      }
-    } catch {
-      setErrMsg("Servidor não está respondendo. Tente novamente.");
+      setSuccessMsg("Sua senha foi redefinida com sucesso!");
+      setPassword("");
+      setConfirmPassword("");
+      setSubmitted(false);
+      setTimeout(() => router.push("/login"), 3000);
+    } catch (err) {
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+      // O link e de uso unico: reaproveitar um link ja usado cai no 401.
+      setErrMsg(
+        status === 401 || status === 404
+          ? "Link inválido, expirado ou já usado. Solicite uma nova redefinição."
+          : status === 400
+            ? "A senha não atende aos critérios de segurança."
+            : status === 429
+              ? "Muitas tentativas. Tente novamente mais tarde."
+              : "Servidor não está respondendo. Tente novamente.",
+      );
       errRef.current?.focus();
     } finally {
       setIsLoading(false);

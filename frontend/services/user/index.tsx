@@ -2,24 +2,25 @@ import api from "@/libs/api";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
+export type SubscriptionStatus =
+  | "active"
+  | "past_due"
+  /** Cancelamento agendado: o plano segue ativo ate o fim do periodo pago. */
+  | "canceling"
+  | "canceled";
+
 export interface UserProfile {
   /** null enquanto o usuario nao preencheu o nome (o cadastro nao exige). */
   name: string | null;
   email: string;
   plan: "FREE" | "STANDARD" | "PRO";
   credits: number;
-  // "active" | "past_due" | "canceled" | null (sem assinatura)
-  subscriptionStatus: "active" | "past_due" | "canceled" | null;
+  /** null quando nunca houve assinatura. */
+  subscriptionStatus: SubscriptionStatus | null;
   isVerified: boolean;
 }
 
-// POST /auth/login devolve apenas { token }.
-// `token` é o accessToken — mande no header Authorization.
-// O refreshToken NÃO vem no corpo: ele é gravado como cookie httpOnly, para
-// que JavaScript nenhum consiga lê-lo. Quem o usa é o proxy.ts (server-side).
-export interface AuthResponse {
-  token: string;
-}
+const isSuccess = (status: number) => status >= 200 && status < 300;
 
 // ─── Profile ──────────────────────────────────────────────────────────────────
 
@@ -29,8 +30,7 @@ export async function getProfile(): Promise<UserProfile> {
 }
 
 // ─── Update own profile (PATCH /user/profile) ─────────────────────────────────
-// AuthGuard + MailGuard. O id vem do token — manda só { name }. Devolve o
-// profile enxuto atualizado (mesmo shape do GET /user/profile).
+// AuthGuard + VerifiedEmailGuard. O id vem do token — manda so { name }.
 
 export async function updateProfileName(name: string): Promise<UserProfile> {
   const response = await api.patch("/user/profile", { name });
@@ -38,8 +38,8 @@ export async function updateProfileName(name: string): Promise<UserProfile> {
 }
 
 // ─── Change own password (PATCH /user/password) ───────────────────────────────
-// AuthGuard + MailGuard. Exige a senha atual (bcrypt.compare). 401 se a senha
-// atual estiver incorreta ("Current password is incorrect").
+// Exige a senha atual (401 se errada). Derruba as OUTRAS sessoes do usuario;
+// a de quem trocou continua valendo.
 
 export async function changePassword(
   currentPassword: string,
@@ -52,12 +52,25 @@ export async function changePassword(
   return response.data;
 }
 
+// ─── LGPD: exportar e excluir ─────────────────────────────────────────────────
+
+/**
+ * GET /user/me/export devolve um JSON como anexo. Use como href de um link:
+ * o browser baixa o arquivo com os cookies da sessao.
+ */
+export const EXPORT_DATA_URL = "/api/user/me/export";
+
+/** DELETE /user/me — exige a senha. Cancela a assinatura antes de apagar. */
+export async function deleteMyAccount(password: string): Promise<void> {
+  await api.delete("/user/me", { data: { password } });
+}
+
 // ─── Email Verification (POST /auth/verify-email) ─────────────────────────────
-// Reenvia o email de confirmação. Response 200 com corpo vazio.
+// Reenvia o e-mail de confirmacao. Responde 202 exista a conta ou nao.
 
 export async function sendEmailVerification(email: string): Promise<boolean> {
   const response = await api.post("/auth/verify-email", { email });
-  return response.status === 200 || response.status === 201;
+  return isSuccess(response.status);
 }
 
 // ─── Register ────────────────────────────────────────────────────
@@ -66,21 +79,22 @@ export async function register(data: {
   name: string;
   email: string;
   password: string;
+  /** Token do Cloudflare Turnstile, quando o captcha esta configurado. */
+  captchaToken?: string;
 }) {
   const response = await api.post("/auth/register", data);
   return response.data;
 }
 
 // ─── Login ───────────────────────────────────────────────────────
+// A rota /api/auth/login do Next grava a sessao em cookies httpOnly; nenhum
+// token volta para o JavaScript.
 
 export async function login(data: {
   email: string;
   password: string;
-}): Promise<AuthResponse> {
-  const response = await api.post("/auth/login", data, {
-    withCredentials: true, // 🔥 importante para cookie
-  });
-
+}): Promise<{ ok: true }> {
+  const response = await api.post("/auth/login", data);
   return response.data;
 }
 
@@ -99,11 +113,9 @@ export async function forgotPassword(email: string) {
 }
 
 // ─── Reset Password ──────────────────────────────────────────────
+// O link e de uso unico e derruba todas as sessoes abertas.
 
-export async function resetPassword(
-  token: string,
-  newPassword: string
-) {
+export async function resetPassword(token: string, newPassword: string) {
   const response = await api.post("/auth/reset-password", {
     token,
     newPassword,
@@ -112,18 +124,9 @@ export async function resetPassword(
   return response.data;
 }
 
-// ─── Refresh Token ───────────────────────────────────────────────
-
-export async function refreshToken() {
-  const response = await api.post("/auth/refresh-token", {}, {
-    withCredentials: true,
-  });
-
-  return response.data;
-}
-
 // ─── Sign Out ─────────────────────────────────────────────────────
+// Revoga a sessao no backend e apaga os cookies.
 
 export async function signOut() {
-  await api.post("/auth/logout", {}, { withCredentials: true });
+  await api.post("/auth/logout");
 }

@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 
 
+import axios from "axios";
 import InputField from "../inputField";
 import api from "@/libs/api";
 
@@ -38,27 +39,22 @@ export default function ForgotPassword() {
     setErrMsg("");
 
     try {
-      const response = await api.post(
-        "auth/forgot-password",
-        { email },
-        { headers: { "Content-Type": "application/json" }, withCredentials: true }
+      await api.post("auth/forgot-password", { email });
+
+      // O backend responde igual exista a conta ou nao: a tela tambem, para
+      // nao revelar quem tem cadastro.
+      setSuccessMsg(
+        "Se houver uma conta com este e-mail, enviamos as instruções para redefinir a senha.",
       );
-
-      setSuccessMsg("Instruções para redefinir sua senha foram enviadas para seu e-mail.");
-
-      if (response.status === 204) {
-        setEmail("");
-        setSubmitted(false);
-        setTimeout(() => router.push("/login"), 3000);
-      } else {
-        if (response.status === 404) {
-          setErrMsg("E-mail não encontrado em nosso sistema.");
-        } else if (response.status === 429) {
-          setErrMsg("Muitas tentativas. Tente novamente mais tarde.");
-        }
-      }
-    } catch {
-      setErrMsg("Servidor não está respondendo. Tente novamente.");
+      setEmail("");
+      setSubmitted(false);
+      setTimeout(() => router.push("/login"), 3000);
+    } catch (err) {
+      setErrMsg(
+        axios.isAxiosError(err) && err.response?.status === 429
+          ? "Muitas tentativas. Tente novamente mais tarde."
+          : "Servidor não está respondendo. Tente novamente.",
+      );
       errRef.current?.focus();
     } finally {
       setIsLoading(false);

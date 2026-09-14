@@ -27,7 +27,7 @@ export default function Header() {
     return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-  // Lê o cookie refreshToken e valida o JWT (server action)
+  // Pergunta ao BFF (/api/auth/session): os cookies de sessão são httpOnly
   useEffect(() => {
     let active = true;
     isLogged()

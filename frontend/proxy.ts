@@ -1,19 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyJwtToken } from "./libs/auth";
+import { applySession, resolveSession } from "./libs/server/auth-context";
+import { clientIpFrom } from "./libs/server/backend";
+import { ACCESS_COOKIE, REFRESH_COOKIE } from "./libs/server/session";
 
-// Next 16: a convenção `middleware` foi renomeada para `proxy` e passa a rodar
-// no Node.js runtime por padrão (em vez do Edge). Isso resolve o
-// MIDDLEWARE_INVOCATION_FAILED na Vercel, que ocorria porque a verificação de
-// JWT com `jose` falhava ao inicializar no Edge Runtime.
+// Next 16: a convencao `middleware` foi renomeada para `proxy` e roda no
+// Node.js runtime por padrao.
 //
-// Modelo de proteção: tudo que NÃO está em `publicRoutes` é privado por
-// padrão (fail-closed). Ao criar uma rota pública nova, adicione-a aqui —
-// esquecer só torna a rota mais restrita, nunca mais aberta.
+// Modelo de protecao: tudo que NAO esta em `publicRoutes` e privado por
+// padrao (fail-closed). Ao criar uma rota publica nova, adicione-a aqui —
+// esquecer so torna a rota mais restrita, nunca mais aberta.
+//
+// O proxy e so a primeira camada (decide a navegacao). Os dados vem das rotas
+// /api, e quem autoriza de verdade sao os guards do backend.
 
 type PublicRoute = {
   path: string;
   /**
-   * O que fazer quando um usuário JÁ logado acessa esta rota:
+   * O que fazer quando um usuario JA logado acessa esta rota:
    * "redirect" manda para o dashboard (ex.: /login), "next" deixa passar.
    */
   whenAuthenticated: "redirect" | "next";
@@ -36,7 +39,7 @@ const publicRoutes: readonly PublicRoute[] = [
   { path: "/termos-de-uso", whenAuthenticated: "next" },
 ];
 
-// Rotas que exigem role "admin" no JWT. Prefixo: "/admin" cobre "/admin/*".
+// Rotas que exigem role ADMIN. Prefixo: "/admin" cobre "/admin/*".
 const adminRoutes = ["/admin"];
 
 const REDIRECT_WHEN_NOT_AUTHENTICATED = "/login";
@@ -48,8 +51,8 @@ export async function proxy(request: NextRequest) {
     return await handleProxy(request);
   } catch (error) {
     console.error("Proxy error:", error);
-    // Um erro inesperado não pode derrubar o site inteiro. As rotas privadas
-    // continuam protegidas pelos guards do backend.
+    // Um erro inesperado nao pode derrubar o site inteiro. Os dados continuam
+    // protegidos pelos guards do backend.
     return NextResponse.next();
   }
 }
@@ -57,7 +60,6 @@ export async function proxy(request: NextRequest) {
 async function handleProxy(request: NextRequest) {
   const path = request.nextUrl.pathname;
   const publicRoute = publicRoutes.find((route) => route.path === path);
-  const authToken = request.cookies.get("refreshToken");
   const isAdminRoute = adminRoutes.some((route) => path.startsWith(route));
 
   const redirectTo = (pathname: string) => {
@@ -67,45 +69,48 @@ async function handleProxy(request: NextRequest) {
     return NextResponse.redirect(url);
   };
 
-  // Sem cookie: só passa em rota pública.
-  if (!authToken) {
+  const hasSessionCookie =
+    request.cookies.has(ACCESS_COOKIE) || request.cookies.has(REFRESH_COOKIE);
+
+  // Sem cookie: so passa em rota publica.
+  if (!hasSessionCookie) {
     return publicRoute
       ? NextResponse.next()
       : redirectTo(REDIRECT_WHEN_NOT_AUTHENTICATED);
   }
 
-  // Com cookie, mas a assinatura pode estar inválida/expirada. Validamos uma
-  // única vez e reaproveitamos o resultado nas checagens abaixo.
-  const session = await verifyJwtToken(authToken.value);
+  // Access token valido, ou renovado agora pelo refresh. O par renovado vai
+  // na resposta (applySession), antes de a pagina chamar qualquer /api.
+  const resolved = await resolveSession(
+    request.cookies,
+    clientIpFrom(request.headers),
+  );
+  const { session } = resolved;
 
-  // Token inválido em rota privada: limpa o cookie e manda logar de novo.
-  if (!session && !publicRoute) {
-    const response = redirectTo(REDIRECT_WHEN_NOT_AUTHENTICATED);
-    response.cookies.delete("refreshToken");
-    return response;
+  let response: NextResponse;
+
+  if (!session) {
+    response = publicRoute
+      ? NextResponse.next()
+      : redirectTo(REDIRECT_WHEN_NOT_AUTHENTICATED);
+  } else if (publicRoute?.whenAuthenticated === "redirect") {
+    response = redirectTo(REDIRECT_WHEN_AUTHENTICATED);
+  } else if (isAdminRoute && session.role !== "ADMIN") {
+    response = redirectTo(REDIRECT_WHEN_NOT_ADMIN);
+  } else {
+    response = NextResponse.next();
   }
 
-  // Logado tentando abrir /login, /register etc.
-  if (session && publicRoute?.whenAuthenticated === "redirect") {
-    return redirectTo(REDIRECT_WHEN_AUTHENTICATED);
-  }
-
-  // Rota de admin exige a role correspondente.
-  if (isAdminRoute && session?.role !== "ADMIN") {
-    return redirectTo(REDIRECT_WHEN_NOT_ADMIN);
-  }
-
-  return NextResponse.next();
+  return applySession(response, resolved);
 }
 
 export const config = {
   matcher: [
     /*
-     * Match all request paths except for the ones starting with:
-     * - api (API routes)
-     * - _next/static (static files)
-     * - _next/image (image optimization files)
-     * - favicon.ico, sitemap.xml, robots.txt (metadata file)
+     * Tudo, exceto:
+     * - api (rotas /api resolvem a sessao por conta propria)
+     * - _next/static, _next/image (arquivos estaticos)
+     * - favicon.ico, sitemap.xml, robots.txt (metadados)
      */
     "/((?!api|_next/static|_next/image|favicon.ico|sitemap.xml|robots.txt).*)",
   ],

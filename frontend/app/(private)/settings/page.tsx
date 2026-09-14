@@ -9,17 +9,23 @@ import {
   getProfile,
   updateProfileName,
   changePassword,
+  deleteMyAccount,
+  signOut,
+  EXPORT_DATA_URL,
   type UserProfile,
 } from "@/services/user";
 import {
   cancelSubscription,
   fetchMyPayments,
+  refundLastPayment,
+  resumeSubscription,
+  REFUND_WINDOW_MS,
   type Payment,
 } from "@/services/payments";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
-type SettingsSection = "general" | "language" | "payments";
+type SettingsSection = "general" | "language" | "payments" | "privacy";
 
 interface PasswordForm {
   current: string;
@@ -48,6 +54,7 @@ const PLAN_LABEL: Record<UserProfile["plan"], string> = {
 const SUBSCRIPTION_LABEL: Record<string, string> = {
   active: "Ativa",
   past_due: "Pagamento pendente",
+  canceling: "Cancelamento agendado",
   canceled: "Cancelada",
 };
 
@@ -218,7 +225,7 @@ function SectionGeneral({
     const errs: PasswordErrors = {};
     if (!password.current) errs.current = "Senha atual obrigatória.";
     if (!password.next) errs.next = "Nova senha obrigatória.";
-    else if (password.next.length < 6) errs.next = "Mínimo 6 caracteres.";
+    else if (password.next.length < 8) errs.next = "Mínimo 8 caracteres.";
     else if (password.next === password.current) errs.next = "A nova senha deve ser diferente da atual.";
     if (!password.confirm) errs.confirm = "Confirme a nova senha.";
     else if (password.next !== password.confirm) errs.confirm = "As senhas não coincidem.";
@@ -267,6 +274,10 @@ function SectionGeneral({
             setPasswordErrors({ current: "Senha atual incorreta." });
           } else if (err.response?.status === 403) {
             setPasswordErrors({ general: "Confirme seu e-mail antes de trocar a senha." });
+          } else if (err.response?.status === 400) {
+            setPasswordErrors({ next: "A nova senha não é forte o suficiente." });
+          } else if (err.response?.status === 429) {
+            setPasswordErrors({ general: "Muitas tentativas. Tente novamente mais tarde." });
           } else {
             setPasswordErrors({ general: "Erro ao atualizar senha. Tente novamente." });
           }
@@ -359,7 +370,7 @@ function SectionGeneral({
           />
         </SettingRow>
 
-        <SettingRow label="Nova senha" description="Mínimo de 6 caracteres.">
+        <SettingRow label="Nova senha" description="Mínimo de 8 caracteres. Suas outras sessões são encerradas ao trocar.">
           <div className="flex flex-col gap-3">
             <FieldInput
               label="Nova senha"
@@ -497,8 +508,15 @@ function SectionPayments({
 
   const [canceling, setCanceling] = useState(false);
   const [cancelError, setCancelError] = useState<string | null>(null);
-  const [cancelDone, setCancelDone] = useState(false);
   const [confirmingCancel, setConfirmingCancel] = useState(false);
+  const [resuming, setResuming] = useState(false);
+
+  const [canRefund, setCanRefund] = useState(false);
+  const [refunding, setRefunding] = useState(false);
+  const [confirmingRefund, setConfirmingRefund] = useState(false);
+  const [refundError, setRefundError] = useState<string | null>(null);
+
+  const [notice, setNotice] = useState<string | null>(null);
 
   const loadPayments = useCallback(async () => {
     setLoadingPayments(true);
@@ -506,6 +524,13 @@ function SectionPayments({
     try {
       const data = await fetchMyPayments();
       setPayments(data);
+      // Botao de reembolso so aparece dentro dos 7 dias do direito de
+      // arrependimento. O backend confere de novo — isto e so a UI.
+      const latestPaid = data.find((p) => p.status === "PAID");
+      setCanRefund(
+        !!latestPaid &&
+          Date.now() - new Date(latestPaid.paidAt).getTime() <= REFUND_WINDOW_MS,
+      );
     } catch (err) {
       const msg =
         axios.isAxiosError(err) && err.response?.status === 403
@@ -513,6 +538,7 @@ function SectionPayments({
           : "Não foi possível carregar suas faturas.";
       setPaymentsError(msg);
       setPayments([]);
+      setCanRefund(false);
     } finally {
       setLoadingPayments(false);
     }
@@ -522,26 +548,32 @@ function SectionPayments({
     loadPayments();
   }, [loadPayments]);
 
-  const isActive = profile.subscriptionStatus === "active";
+  const status = profile.subscriptionStatus;
+  const canCancel = status === "active" || status === "past_due";
+  const isCanceling = status === "canceling";
+
+  const refreshProfile = useCallback(async () => {
+    try {
+      onProfileUpdated(await getProfile());
+    } catch {
+      /* mantém o estado atual se a releitura falhar */
+    }
+  }, [onProfileUpdated]);
 
   async function handleCancel() {
     setCanceling(true);
     setCancelError(null);
     try {
       await cancelSubscription();
-      setCancelDone(true);
       setConfirmingCancel(false);
-      // Reflete o novo estado (volta para FREE / canceled)
-      try {
-        const fresh = await getProfile();
-        onProfileUpdated(fresh);
-      } catch {
-        /* mantém o estado atual se a releitura falhar */
-      }
+      setNotice(
+        "Cancelamento agendado. Seu plano continua ativo até o fim do período já pago.",
+      );
+      await refreshProfile();
     } catch (err) {
       let msg = "Não foi possível cancelar. Tente novamente.";
       if (axios.isAxiosError(err)) {
-        if (err.response?.status === 400) msg = "Você não possui uma assinatura ativa.";
+        if (err.response?.status === 400) msg = "Não há assinatura ativa para cancelar.";
         else if (err.response?.status === 403) msg = "Confirme seu e-mail antes de cancelar.";
       }
       setCancelError(msg);
@@ -550,26 +582,75 @@ function SectionPayments({
     }
   }
 
+  async function handleResume() {
+    setResuming(true);
+    setCancelError(null);
+    try {
+      await resumeSubscription();
+      setNotice("Assinatura retomada. Nada muda na sua cobrança.");
+      await refreshProfile();
+    } catch {
+      setCancelError("Não foi possível retomar a assinatura. Tente novamente.");
+    } finally {
+      setResuming(false);
+    }
+  }
+
+  async function handleRefund() {
+    setRefunding(true);
+    setRefundError(null);
+    try {
+      await refundLastPayment();
+      setConfirmingRefund(false);
+      setNotice(
+        "Reembolso solicitado. O valor volta para o cartão em alguns dias úteis, e o plano foi encerrado.",
+      );
+      await Promise.all([refreshProfile(), loadPayments()]);
+    } catch (err) {
+      let msg = "Não foi possível solicitar o reembolso. Tente novamente.";
+      if (axios.isAxiosError(err)) {
+        if (err.response?.status === 400) msg = "Não há cobrança dentro do prazo de 7 dias.";
+        else if (err.response?.status === 422)
+          msg = "Não localizamos a cobrança original. Fale com o suporte.";
+      }
+      setRefundError(msg);
+    } finally {
+      setRefunding(false);
+    }
+  }
+
+  const spinner = (
+    <svg className="animate-spin" width="13" height="13" viewBox="0 0 12 12" fill="none">
+      <path d="M6 1a5 5 0 1 0 5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+
   return (
     <div style={{ animation: "fadeUp 0.35s ease both" }}>
       {/* Plano atual */}
       <h3 className="eyebrow text-ink/40 mb-1">Assinatura</h3>
 
+      {notice && (
+        <div className="mt-4 bg-emerald-50 border border-emerald-200 rounded-md px-4 py-3 text-[14px] text-emerald-700">
+          {notice}
+        </div>
+      )}
+
       <SettingRow label="Plano atual" description="Seu plano e status de assinatura.">
         <div className="flex flex-col gap-4">
           <div className="flex items-center gap-3 flex-wrap">
             <span className="text-[20px] font-semibold text-ink">{PLAN_LABEL[profile.plan]}</span>
-            {profile.subscriptionStatus && (
+            {status && (
               <span
                 className={`text-[12px] font-medium rounded-pill px-3 py-1 border ${
-                  profile.subscriptionStatus === "active"
+                  status === "active"
                     ? "text-emerald-700 bg-emerald-50 border-emerald-200"
-                    : profile.subscriptionStatus === "past_due"
+                    : status === "past_due" || status === "canceling"
                       ? "text-amber-700 bg-amber-50 border-amber-200"
                       : "text-ink/55 bg-surface-soft border-hairline"
                 }`}
               >
-                {SUBSCRIPTION_LABEL[profile.subscriptionStatus] ?? profile.subscriptionStatus}
+                {SUBSCRIPTION_LABEL[status] ?? status}
               </span>
             )}
           </div>
@@ -588,11 +669,11 @@ function SectionPayments({
         </div>
       </SettingRow>
 
-      {/* Cancelamento */}
-      {isActive && (
+      {/* Cancelamento (no fim do período já pago) */}
+      {canCancel && (
         <SettingRow
           label="Cancelar assinatura"
-          description="Você volta para o plano Gratuito. Os créditos já acumulados permanecem."
+          description="A assinatura não renova. O plano continua ativo até o fim do período já pago; depois você volta para o Gratuito e os créditos acumulados permanecem."
         >
           {cancelError && (
             <div className="mb-4 bg-red-50 border border-red-200 rounded-md px-4 py-3 text-[14px] text-red-600">
@@ -614,7 +695,7 @@ function SectionPayments({
           ) : (
             <div className="flex flex-col gap-3">
               <p className="text-[14px] text-ink/70">
-                Tem certeza? Sua assinatura será cancelada e você voltará ao plano Gratuito.
+                Tem certeza? A assinatura não será renovada no próximo ciclo.
               </p>
               <div className="flex items-center gap-3">
                 <button
@@ -625,9 +706,7 @@ function SectionPayments({
                 >
                   {canceling ? (
                     <>
-                      <svg className="animate-spin" width="13" height="13" viewBox="0 0 12 12" fill="none">
-                        <path d="M6 1a5 5 0 1 0 5 5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
-                      </svg>
+                      {spinner}
                       Cancelando…
                     </>
                   ) : (
@@ -648,12 +727,91 @@ function SectionPayments({
         </SettingRow>
       )}
 
-      {cancelDone && !isActive && (
-        <div className="py-6 border-b border-hairline-soft">
-          <div className="bg-emerald-50 border border-emerald-200 rounded-md px-4 py-3 text-[14px] text-emerald-700">
-            Assinatura cancelada. Você está no plano Gratuito; seus créditos restantes continuam disponíveis.
-          </div>
-        </div>
+      {/* Cancelamento agendado: dá para voltar atrás */}
+      {isCanceling && (
+        <SettingRow
+          label="Cancelamento agendado"
+          description="Mudou de ideia? Retome antes do fim do período e nada muda na cobrança."
+        >
+          {cancelError && (
+            <div className="mb-4 bg-red-50 border border-red-200 rounded-md px-4 py-3 text-[14px] text-red-600">
+              {cancelError}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={handleResume}
+            disabled={resuming}
+            className="inline-flex items-center gap-2 text-[14px] font-medium text-canvas bg-ink hover:opacity-90 disabled:opacity-40 disabled:cursor-not-allowed px-5 py-2.5 rounded-pill transition-opacity cursor-pointer border-none"
+          >
+            {resuming ? (
+              <>
+                {spinner}
+                Retomando…
+              </>
+            ) : (
+              "Retomar assinatura"
+            )}
+          </button>
+        </SettingRow>
+      )}
+
+      {/* Direito de arrependimento (CDC Art. 49) */}
+      {canRefund && (
+        <SettingRow
+          label="Pedir reembolso"
+          description="Até 7 dias depois da cobrança você pode desistir e receber o valor integral, sem justificativa. O plano é encerrado na hora."
+        >
+          {refundError && (
+            <div className="mb-4 bg-red-50 border border-red-200 rounded-md px-4 py-3 text-[14px] text-red-600">
+              {refundError}
+            </div>
+          )}
+
+          {!confirmingRefund ? (
+            <button
+              type="button"
+              onClick={() => {
+                setConfirmingRefund(true);
+                setRefundError(null);
+              }}
+              className="inline-flex items-center gap-2 text-[14px] font-medium text-ink border border-hairline hover:border-ink px-5 py-2.5 rounded-pill transition-colors cursor-pointer"
+            >
+              Pedir reembolso
+            </button>
+          ) : (
+            <div className="flex flex-col gap-3">
+              <p className="text-[14px] text-ink/70">
+                O valor da última cobrança volta para o cartão, a assinatura é encerrada agora e os créditos dessa cobrança são removidos.
+              </p>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={handleRefund}
+                  disabled={refunding}
+                  className="inline-flex items-center gap-2 text-[14px] font-medium text-canvas bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2.5 rounded-pill transition-colors cursor-pointer"
+                >
+                  {refunding ? (
+                    <>
+                      {spinner}
+                      Solicitando…
+                    </>
+                  ) : (
+                    "Confirmar reembolso"
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setConfirmingRefund(false)}
+                  disabled={refunding}
+                  className="inline-flex items-center text-[14px] font-medium text-ink/60 hover:text-ink px-5 py-2.5 rounded-pill transition-colors cursor-pointer"
+                >
+                  Voltar
+                </button>
+              </div>
+            </div>
+          )}
+        </SettingRow>
       )}
 
       {/* Histórico de faturas */}
@@ -718,6 +876,119 @@ function SectionPayments({
   );
 }
 
+// ─── Section: Privacy (LGPD) ──────────────────────────────────────────────────
+
+function SectionPrivacy() {
+  const [confirming, setConfirming] = useState(false);
+  const [password, setPassword] = useState("");
+  const [deleting, setDeleting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function handleDelete(e: React.FormEvent) {
+    e.preventDefault();
+    if (!password) {
+      setError("Digite sua senha para confirmar.");
+      return;
+    }
+
+    setDeleting(true);
+    setError(null);
+
+    try {
+      await deleteMyAccount(password);
+      // A conta e as sessoes ja nao existem no backend; falta apagar os
+      // cookies deste navegador.
+      await signOut().catch(() => undefined);
+      window.location.assign("/");
+    } catch (err) {
+      let msg = "Não foi possível excluir a conta. Tente novamente.";
+      if (axios.isAxiosError(err)) {
+        if (err.response?.status === 401) msg = "Senha incorreta.";
+        else if (err.response?.status === 429)
+          msg = "Muitas tentativas. Aguarde um pouco e tente de novo.";
+        else if (err.response?.status === 503)
+          msg = "Não conseguimos encerrar sua assinatura agora. Tente novamente em instantes.";
+      }
+      setError(msg);
+      setDeleting(false);
+    }
+  }
+
+  return (
+    <div style={{ animation: "fadeUp 0.35s ease both" }}>
+      <h3 className="eyebrow text-ink/40 mb-1">Seus dados</h3>
+
+      <SettingRow
+        label="Exportar meus dados"
+        description="Baixe um arquivo JSON com os dados da sua conta, cobranças e sessões (LGPD, Art. 18)."
+      >
+        <a
+          href={EXPORT_DATA_URL}
+          download
+          className="inline-flex w-fit items-center gap-2 text-[14px] font-medium text-ink border border-hairline hover:border-ink px-5 py-2.5 rounded-pill transition-colors"
+        >
+          Baixar meus dados
+        </a>
+      </SettingRow>
+
+      <SettingRow
+        label="Excluir conta"
+        description="Apaga sua conta e encerra a assinatura na hora, sem reembolso do período restante. Os registros de cobrança ficam guardados sem vínculo com você, por obrigação fiscal. Não dá para desfazer."
+      >
+        {error && (
+          <div className="mb-4 bg-red-50 border border-red-200 rounded-md px-4 py-3 text-[14px] text-red-600">
+            {error}
+          </div>
+        )}
+
+        {!confirming ? (
+          <button
+            type="button"
+            onClick={() => {
+              setConfirming(true);
+              setError(null);
+            }}
+            className="inline-flex items-center gap-2 text-[14px] font-medium text-red-600 border border-red-200 bg-red-50 hover:bg-red-100 px-5 py-2.5 rounded-pill transition-colors cursor-pointer"
+          >
+            Excluir minha conta
+          </button>
+        ) : (
+          <form onSubmit={handleDelete} noValidate className="flex flex-col gap-3">
+            <FieldInput
+              label="Confirme sua senha"
+              value={password}
+              onChange={setPassword}
+              placeholder="••••••••"
+              autoComplete="current-password"
+              showToggle
+            />
+            <div className="flex items-center gap-3">
+              <button
+                type="submit"
+                disabled={deleting}
+                className="inline-flex items-center gap-2 text-[14px] font-medium text-canvas bg-red-600 hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed px-5 py-2.5 rounded-pill transition-colors cursor-pointer"
+              >
+                {deleting ? "Excluindo…" : "Excluir definitivamente"}
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setConfirming(false);
+                  setPassword("");
+                }}
+                disabled={deleting}
+                className="inline-flex items-center text-[14px] font-medium text-ink/60 hover:text-ink px-5 py-2.5 rounded-pill transition-colors cursor-pointer"
+              >
+                Cancelar
+              </button>
+            </div>
+          </form>
+        )}
+      </SettingRow>
+    </div>
+  );
+}
+
 // ─── Nav items ────────────────────────────────────────────────────────────────
 
 const NAV: { key: SettingsSection; label: string; icon: React.ReactNode }[] = [
@@ -744,6 +1015,20 @@ const NAV: { key: SettingsSection; label: string; icon: React.ReactNode }[] = [
         <rect x="1.5" y="3.5" width="13" height="9" rx="1.5" stroke="currentColor" strokeWidth="1.3" />
         <path d="M1.5 6.5h13" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
         <path d="M4 10h3" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" />
+      </svg>
+    ),
+  },
+  {
+    key: "privacy",
+    label: "Privacidade",
+    icon: (
+      <svg width="18" height="18" viewBox="0 0 16 16" fill="none">
+        <path
+          d="M8 1.5l5 2v4c0 3.2-2.1 5.9-5 7-2.9-1.1-5-3.8-5-7v-4l5-2z"
+          stroke="currentColor"
+          strokeWidth="1.3"
+          strokeLinejoin="round"
+        />
       </svg>
     ),
   },
@@ -889,6 +1174,7 @@ export default function SettingsPage() {
                 {active === "payments" && (
                   <SectionPayments profile={profile} onProfileUpdated={setProfile} />
                 )}
+                {active === "privacy" && <SectionPrivacy />}
                 {active === "language" && <SectionLanguage />}
               </>
             )}

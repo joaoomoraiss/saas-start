@@ -17,6 +17,7 @@ const PLAN_LABEL: Record<string, string> = {
 const SUBSCRIPTION_LABEL: Record<string, string> = {
   active: "Ativa",
   past_due: "Pagamento pendente",
+  canceling: "Cancelamento agendado",
   canceled: "Cancelada",
 };
 

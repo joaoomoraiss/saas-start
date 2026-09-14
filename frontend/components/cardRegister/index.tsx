@@ -7,7 +7,8 @@ import axios from "axios";
 import Logo from "@/public/Logo.png";
 import { siteConfig } from "@/libs/siteConfig";
 import InputField from "@/components/inputField";
-import api from "@/libs/api";
+import Turnstile, { captchaEnabled } from "@/components/turnstile";
+import { register } from "@/services/user";
 
 interface FormState {
   name: string;
@@ -35,6 +36,10 @@ export default function CardRegister() {
   });
   const [errors, setErrors] = useState<FormErrors>({});
   const [loading, setLoading] = useState(false);
+  // Token do Cloudflare Turnstile. De uso unico: depois de um envio recusado,
+  // captchaReset gera um desafio novo.
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
+  const [captchaReset, setCaptchaReset] = useState(0);
 
   function handleChange(field: keyof Omit<FormState, "acceptedTerms">) {
     return (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -61,6 +66,8 @@ export default function CardRegister() {
       next.password = "A senha deve ter pelo menos 8 caracteres.";
     if (!form.acceptedTerms)
       next.acceptedTerms = "Você precisa aceitar os termos para continuar.";
+    if (captchaEnabled && !captchaToken)
+      next.general = "Confirme a verificação de segurança antes de continuar.";
     setErrors(next);
     return Object.keys(next).length === 0;
   }
@@ -73,19 +80,34 @@ export default function CardRegister() {
     setErrors({});
 
     try {
-      await api.post("auth/register/", {
+      await register({
         name: form.name,
         email: form.email,
         password: form.password,
+        ...(captchaToken ? { captchaToken } : {}),
       });
 
       router.push("/login");
     } catch (err: unknown) {
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+      const backendMessage = axios.isAxiosError(err)
+        ? String(err.response?.data?.message ?? "")
+        : "";
+
       const message =
-        axios.isAxiosError(err) && err.response?.data?.message
-          ? err.response.data.message
-          : "Não foi possível criar a conta. Tente novamente.";
+        status === 422
+          ? "Já existe uma conta com este e-mail."
+          : status === 429
+            ? "Muitas tentativas. Tente novamente mais tarde."
+            : status === 400 && backendMessage.includes("Captcha")
+              ? "Não conseguimos confirmar a verificação de segurança. Tente de novo."
+              : status === 400
+                ? "Confira os dados: a senha precisa ser forte (maiúscula, minúscula, número e símbolo)."
+                : "Não foi possível criar a conta. Tente novamente.";
+
       setErrors({ general: message });
+      setCaptchaToken(null);
+      setCaptchaReset((n) => n + 1);
     } finally {
       setLoading(false);
     }
@@ -181,14 +203,14 @@ export default function CardRegister() {
             <span className="text-[13px] text-ink/55 leading-snug">
               Aceito os{" "}
               <a
-                href="/terms"
+                href="/termos-de-uso"
                 className="text-accent font-medium hover:underline"
               >
                 termos de uso
               </a>{" "}
               e a{" "}
               <a
-                href="/privacy"
+                href="/politica-de-privacidade"
                 className="text-accent font-medium hover:underline"
               >
                 política de privacidade
@@ -201,6 +223,13 @@ export default function CardRegister() {
             </p>
           )}
         </div>
+
+        {/* Captcha (so aparece com NEXT_PUBLIC_TURNSTILE_SITE_KEY) */}
+        <Turnstile
+          action="register"
+          onToken={setCaptchaToken}
+          resetSignal={captchaReset}
+        />
 
         {/* Submit */}
         <button

@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import axios from "axios";
 import { isLogged } from "@/libs/isLogged";
 import { getProfile } from "@/services/user";
 import { createCheckout, type Plan, type PaidPlan } from "@/services/payments";
@@ -100,9 +101,12 @@ export default function Pricing({ id = "pricing" }: { id?: string }) {
     };
   }, []);
 
+  const [error, setError] = useState<string | null>(null);
+
   const handleSelect = async (plan: Plan) => {
     if (loadingPlan) return;
     setLoadingPlan(plan);
+    setError(null);
     try {
       const logged = await isLogged();
       // Sem login: manda criar conta antes de assinar.
@@ -118,9 +122,21 @@ export default function Pricing({ id = "pricing" }: { id?: string }) {
       // Planos pagos: abre o Stripe Checkout e redireciona o navegador.
       const { url } = await createCheckout(plan as PaidPlan);
       window.location.href = url;
-    } catch {
-      // Sessão inválida / falha no checkout → manda autenticar.
-      router.push("/register");
+    } catch (err) {
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
+      if (status === 401) {
+        router.push("/login");
+      } else if (status === 409) {
+        // Trocar de plano nao e checkout novo: a assinatura antiga ficaria
+        // cobrando. O backend recusa; aqui so explicamos.
+        setError(
+          "Você já tem uma assinatura (ou um pagamento em processamento). Gerencie o plano em Configurações.",
+        );
+      } else if (status === 403) {
+        setError("Confirme seu e-mail antes de assinar um plano.");
+      } else {
+        setError("Não foi possível iniciar o pagamento. Tente novamente em instantes.");
+      }
     } finally {
       setLoadingPlan(null);
     }
@@ -140,6 +156,12 @@ export default function Pricing({ id = "pricing" }: { id?: string }) {
             surpresa na fatura.
           </p>
         </div>
+
+        {error && (
+          <div className="max-w-2xl mx-auto mb-8 bg-red-50 border border-red-200 rounded-md px-4 py-3 text-[14px] text-red-600 text-center">
+            {error}
+          </div>
+        )}
 
         {/* Grid de planos */}
         <div className="grid md:grid-cols-3 gap-6 items-start">

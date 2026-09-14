@@ -59,10 +59,16 @@ export default function CardLogin() {
 
       router.push("/dashboard");
     } catch (err: unknown) {
+      const status = axios.isAxiosError(err) ? err.response?.status : undefined;
       const message =
-        axios.isAxiosError(err) && err.response?.data?.message
-          ? err.response.data.message
-          : "E-mail ou senha inválidos. Tente novamente.";
+        status === 429
+          ? "Muitas tentativas de login. Aguarde um minuto e tente de novo."
+          : status === 503
+            ? "Servidor indisponível. Tente novamente em instantes."
+            : axios.isAxiosError(err) &&
+                err.response?.data?.message === "Email not verified"
+              ? "Confirme seu e-mail antes de entrar."
+              : "E-mail ou senha inválidos. Tente novamente.";
       setErrors({ general: message });
     } finally {
       setLoading(false);
